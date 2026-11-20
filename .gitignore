@@ -1,0 +1,7 @@
+# sample data and answers are for local evaluation only, never committed
+sample/
+output.jsonl
+__pycache__/
+*.pyc
+.DS_Store
+work/
