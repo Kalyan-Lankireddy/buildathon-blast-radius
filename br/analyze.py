@@ -38,6 +38,13 @@ CONFIG_NAMES = {"pyproject.toml", "setup.py", "setup.cfg", "pytest.ini", "tox.in
 MAX_CHANGED_LINES = 60  # changed code lines in one file before we stop analysing and run everything
 
 
+class _Masker(ast.NodeTransformer):
+    """Replace every constant by its type, so two statements compare equal when only literal values differ."""
+
+    def visit_Constant(self, node):
+        return ast.copy_location(ast.Constant(value=f"<{type(node.value).__name__}>"), node)
+
+
 class FullSuite(Exception):
     """Raised when the only safe answer is every test."""
 
@@ -67,6 +74,7 @@ class Maps:
         self._dict_keys: dict[str, int] = raw.get("dict_keys", {})
         self._dict_iter: dict[str, int] = raw.get("dict_iter", {})
         self._wrapped = set(raw.get("wrapped_dicts", []))
+        self.dispatch_recorded: bool = bool(raw.get("dispatch_recorded", False))
         self._descendants: dict[str, list[str]] = raw.get("descendants", {})
         self._spawners = self.mask(raw.get("spawn_tests"))  # tests that start a subprocess
         self._core = set(raw.get("core_modules", []))  # files that a bare `import sqlglot` loads
@@ -261,8 +269,8 @@ class Analyzer:
         mask = 0
         for r in removed:
             mask |= self.old_line_mask(rel, otree, r)
-        replaced, paired_old = self.replacement_slots(otree, ntree, edit, added)
-        if self.import_time_risk(otree, ntree, removed, added, paired_old):
+        replaced, pair_of = self.replacement_slots(otree, ntree, edit, added)
+        if self.import_time_risk(otree, ntree, removed, added, pair_of):
             # A change that runs while the module loads can crash the import. In a module that
             # `import sqlglot` loads that fails every test; elsewhere it fails the tests that import it.
             if maps.is_core(rel):
@@ -270,13 +278,14 @@ class Analyzer:
             mask |= self.module_mask(rel, depth_limit=None) | maps.spawners_for(rel)
             self.note(f"{rel}: import-time statement that is not a plain literal -> module users")
         for a, prev_old, next_old in added:
-            if a in replaced:
+            if a in replaced and ntree.scope_of(a).kind != "classbody":
                 continue  # takes the place of a removed line: that line's own tests already count
+            # (in a class body the new line can name a different dict key than the old one, so it is mapped too)
             mask |= self.new_line_mask(rel, otree, ntree, a, prev_old, next_old)
         return mask
 
     @staticmethod
-    def replacement_slots(otree: PyTree, ntree: PyTree, edit, added) -> tuple[set[int], set[int]]:
+    def replacement_slots(otree: PyTree, ntree: PyTree, edit, added) -> tuple[set[int], dict[int, int]]:
         """Added lines that replace a removed line, in the same kind of place.
 
         A replaced line sits where the old line sat, so the same tests reach it. Only genuine
@@ -289,7 +298,7 @@ class Analyzer:
         for a, prev_old, _ in added:
             by_slot.setdefault(prev_old, []).append(a)
         slots: set[int] = set()
-        paired: set[int] = set()
+        paired: dict[int, int] = {}  # new line -> the old line it replaces
         for prev_old, new_lines in by_slot.items():
             block, p = [], prev_old
             while p in removed:
@@ -308,12 +317,12 @@ class Analyzer:
                     same = True
                 if same:
                     slots.add(new_line)
-                    paired.add(old_line)
+                    paired[new_line] = old_line
         return slots, paired
 
     IMPORT_KINDS = ("classbody", "classheader", "funcheader", "module")
 
-    def import_time_risk(self, otree: PyTree, ntree: PyTree, removed, added, paired_old) -> bool:
+    def import_time_risk(self, otree: PyTree, ntree: PyTree, removed, added, pair_of: dict[int, int]) -> bool:
         """True when a change could make the module fail to import.
 
         Statements outside function bodies run when the module loads. A plain literal (numbers,
@@ -321,6 +330,7 @@ class Analyzer:
         arithmetic on the wrong types, a base class that changed. A deleted statement can leave
         a name undefined.
         """
+        paired_old = set(pair_of.values())
         for r in removed:
             if r in paired_old:
                 continue
@@ -329,9 +339,65 @@ class Analyzer:
                 return True
         for a, _, _ in added:
             sc = ntree.scope_of(a)
-            if sc.kind in self.IMPORT_KINDS and not self.harmless_here(ntree, sc, a) and not self.literal_only(sc.stmt):
-                return True
+            if sc.kind not in self.IMPORT_KINDS or self.harmless_here(ntree, sc, a) or self.literal_only(sc.stmt):
+                continue
+            old_line = pair_of.get(a)
+            if old_line is not None:
+                old_stmt = otree.scope_of(old_line).stmt
+                # In `NAME = {...}` only the entry that changed matters; the other entries are untouched.
+                old_node, new_node = self.entry_at(old_stmt, old_line), self.entry_at(sc.stmt, a)
+                if old_node is None or new_node is None:
+                    old_node, new_node = old_stmt, sc.stmt
+                if self.only_literals_changed(old_node, new_node):
+                    continue
+            return True
         return False
+
+    @staticmethod
+    def entry_at(stmt, line: int):
+        """The `(key, value)` of the dict-literal entry holding `line`, as one node, or None."""
+        value = getattr(stmt, "value", None)
+        if not isinstance(value, ast.Dict):
+            return None
+        for key, val in zip(value.keys, value.values):
+            if key is not None and key.lineno <= line <= val.end_lineno:
+                return ast.Tuple(elts=[key, val], ctx=ast.Load(), lineno=key.lineno, col_offset=0,
+                                 end_lineno=val.end_lineno, end_col_offset=0)
+        return None
+
+    CLOSURE_BUILDERS = {"rename_func"}  # calls that only build a function and never look at their argument
+
+    @classmethod
+    def only_literals_changed(cls, old_stmt, new_stmt) -> bool:
+        """The new statement is the old one with different literal values, and runs no call that could fail.
+
+        Same structure (every constant masked by its type) means no name, attribute or operator changed, so the
+        statement cannot start failing on a missing name. Any call it makes while the module loads must be a
+        closure builder: `rename_func("X")` ignores its argument, but `maybe_parse("...")` parses it, which is how a
+        string edit once broke an import. Calls inside a lambda do not run at import.
+        """
+        if old_stmt is None or new_stmt is None:
+            return False
+
+        def shape(node):
+            return ast.dump(_Masker().visit(ast.parse(ast.unparse(node)).body[0]))
+
+        try:
+            if shape(old_stmt) != shape(new_stmt):
+                return False
+        except Exception:
+            return False
+        stack = [new_stmt]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, ast.Lambda):
+                continue
+            if isinstance(node, ast.Call):
+                f = node.func
+                if (f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)) not in cls.CLOSURE_BUILDERS:
+                    return False
+            stack.extend(ast.iter_child_nodes(node))
+        return True
 
     def harmless_here(self, tree: PyTree, scope, line: int) -> bool:
         stmt = scope.stmt
@@ -454,10 +520,14 @@ class Analyzer:
             m = self.class_mask(rel, scope.cls)
             if stmt is not None:
                 narrowed = self.attribute_readers(tree, stmt)
+                entry = self.dict_entry_readers(rel, tree, stmt, line, scope.cls)
                 if narrowed is not None:
-                    entry = self.dict_entry_readers(rel, tree, stmt, line, scope.cls)
                     # a test must use the class AND read the constant (and, for one dict entry, look it up)
                     m &= narrowed if entry is None else entry
+                elif entry is not None and maps.dispatch_recorded and self.is_transforms(stmt):
+                    # TRANSFORMS is merged into subclasses at import, so the generic read test leaves it out,
+                    # but every lookup goes through a recorded dict: the class table or its cached dispatch copy.
+                    m &= entry
                 m |= maps.lines_mask(rel, range(PyTree.start(stmt), stmt.end_lineno + 1))
             return m | maps.spawners_for(rel)
         # module level
@@ -494,8 +564,13 @@ class Analyzer:
 
     def dict_entry_readers(self, rel: str, tree: PyTree, stmt, line: int, qual: str) -> int | None:
         """For an edit inside one entry of `NAME = {key: value, ...}`: the tests that looked that key up."""
-        if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
-                and isinstance(stmt.value, ast.Dict)):
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+            target = stmt.targets[0]
+        elif isinstance(stmt, ast.AnnAssign):
+            target = stmt.target
+        else:
+            return None
+        if not (isinstance(target, ast.Name) and isinstance(stmt.value, ast.Dict)):
             return None
         for key, value in zip(stmt.value.keys, stmt.value.values):
             first = key.lineno if key is not None else value.lineno
@@ -513,7 +588,12 @@ class Analyzer:
             name = key.id
         else:
             return None
-        return self.maps.dict_entry_mask(f"{module_of(rel)}:{qual}", stmt.targets[0].id, name)
+        return self.maps.dict_entry_mask(f"{module_of(rel)}:{qual}", target.id, name)
+
+    @staticmethod
+    def is_transforms(stmt) -> bool:
+        target = stmt.targets[0] if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 else getattr(stmt, "target", None)
+        return isinstance(target, ast.Name) and target.id == "TRANSFORMS"
 
     @staticmethod
     def type_checking_only(tree: PyTree, stmt) -> bool:

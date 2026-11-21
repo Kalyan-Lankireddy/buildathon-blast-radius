@@ -13,6 +13,8 @@ Track: RWX Blast Radius. Score is simulated CI seconds plus CPU seconds, lower i
 | v1.7 | import-time crashes follow the whole importer chain; a new method in a class body runs everything | 170.717 s | 0 | see below | harness: 53 mutants, 0 misses |
 | v1.7 practice | submitted at 8:11 | | 0 | 1.06 s | practice 206.455 s total |
 | v1.8 | a new method in a class body selects the class's users again (v1.7 ran everything) | 170.717 s | 0 | see below | harness: 55 mutants, 0 misses |
+| v1.8 practice | not yet submitted | | | | |
+| v1.9 | edits to one `TRANSFORMS` entry select the tests that looked that key up (recorded on the dispatch table) | 170.717 s | 0 | see below | dict mutants 297.8 s to 236.2 s, 0 misses |
 
 ## Lessons
 - Per-test coverage is blind to work done in child processes. `test_optimizer` and `test_executor` hand their
@@ -69,3 +71,12 @@ Ground truth for the first batch was recomputed after the failure-summary parser
   (`generator._build_dispatch`). Recorded lookups on the original dict would miss most real lookups, so the attribute
   safety test rightly leaves them out, and what remains is a handful of dicts. Recording lookups on the dispatch table
   itself is the next idea; it needs its own mutants.
+- Dict-entry narrowing for `TRANSFORMS` (v1.9). `TRANSFORMS` is merged into subclasses at import and copied once per class
+  into a cached dispatch table, so recording lookups on the class dict alone would under-select. The labeling run now also
+  wraps the dispatch table (`generator._build_dispatch`), the maps follow `{**Other.TRANSFORMS}` merges between generator
+  classes, and a changed entry maps to the tests that looked its key up, in the class or any class it flows into. The old
+  and the new key of an edited line are both mapped. The import-crash rule no longer treats an entry as risky when only
+  literal values changed and its only calls (outside lambdas) are `rename_func`, which ignores its argument; calls such as
+  `maybe_parse("...")` still count, because that is how a string edit once broke an import.
+  Evidence: 12 `TRANSFORMS`/mapping entry mutants, 0 misses, 297.8 s down to 236.2 s. Not yet validated: edits to an
+  entry's key, and deleted entries. Those are mapped through the same code but have no ground truth yet.

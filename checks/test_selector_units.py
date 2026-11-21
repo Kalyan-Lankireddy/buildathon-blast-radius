@@ -76,7 +76,7 @@ def test_uncommenting_code_is_not_treated_as_a_replacement():
     _, edit = apply_hunks("def f():\n    # x = g()\n    return 1\n", fp.hunks)
     added = [(a, p, n) for a, p, n in edit.added]
     slots, paired = Analyzer.replacement_slots(old, new, edit, added)
-    assert slots == set() and paired == set()
+    assert slots == set() and not paired
 
 
 def test_literal_only_separates_safe_import_time_statements():
@@ -87,3 +87,15 @@ def test_literal_only_separates_safe_import_time_statements():
     assert not Analyzer.literal_only(parse("X = Y - {1}"))
     assert not Analyzer.literal_only(parse("X = [p + q for q in Q]"))
     assert not Analyzer.literal_only(parse("def f(): pass"))
+
+
+def test_a_changed_literal_inside_a_closure_builder_cannot_break_an_import():
+    from br.analyze import Analyzer
+
+    one = lambda src: PyTree(src).module.body[0]  # noqa: E731
+    same_shape = Analyzer.only_literals_changed
+    assert same_shape(one('T = {k: rename_func("A")}'), one('T = {k: rename_func("AZ")}'))
+    assert same_shape(one("T = {k: lambda s, e: f'x {s}'}"), one("T = {k: lambda s, e: f'xy {s}'}"))
+    # a different name, or a parse call that reads its string at import, is not safe
+    assert not same_shape(one('T = {k: rename_func("A")}'), one('T = {j: rename_func("A")}'))
+    assert not same_shape(one('T = maybe_parse("a")'), one('T = maybe_parse("ab")'))

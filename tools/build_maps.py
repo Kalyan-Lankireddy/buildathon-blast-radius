@@ -214,6 +214,35 @@ def descendants():
             subs = []
             walk(cls, subs)
             out[f"{cls.__module__}:{cls.__qualname__}"] = sorted({f"{k.__module__}:{k.__qualname__}" for k in subs})
+    # A generator can also copy another generator's TRANSFORMS into its own at import, without inheriting
+    # from it (`{**PostgresGenerator.TRANSFORMS, ...}`). An edit in the source table reaches the copy.
+    short = {}
+    for full in out:
+        short.setdefault(full.split(":")[1].split(".")[-1], []).append(full)
+    edges = []
+    gens = [os.path.join(ROOT, "sqlglot", "generator.py")] + [
+        os.path.join(ROOT, "sqlglot", "generators", n)
+        for n in sorted(os.listdir(os.path.join(ROOT, "sqlglot", "generators"))) if n.endswith(".py")]
+    for path in gens:
+        with open(path, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        module = module_of(os.path.relpath(path, ROOT))
+        for cls_node in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
+            for node in ast.walk(cls_node):
+                if isinstance(node, ast.Attribute) and node.attr == "TRANSFORMS":
+                    inner = node.value
+                    name = inner.attr if isinstance(inner, ast.Attribute) else getattr(inner, "id", None)
+                    if name and name != cls_node.name and len(short.get(name, [])) == 1:
+                        edges.append((short[name][0], f"{module}:{cls_node.name}"))
+    changed = True
+    while changed:
+        changed = False
+        for source, target in edges:
+            if target in out and source in out:
+                merged = sorted(set(out[source]) | set(out[target]))
+                if merged != out[source]:
+                    out[source] = merged
+                    changed = True
     return out
 
 
@@ -362,6 +391,7 @@ def main():
         "dict_iter": {k: intern(v) for k, v in sorted(dict_iter.items())},
         "descendants": descendants(),
         "wrapped_dicts": wrapped_dicts(),
+        "dispatch_recorded": True,
         "spawn_tests": intern(spawners),
         "core_modules": core_modules(),
         "importers": importers_top,

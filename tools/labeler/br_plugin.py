@@ -195,6 +195,26 @@ def _wrap_class_dicts():
                     setattr(cls, name, rec)
 
 
+def _record_dispatch_tables():
+    """Record lookups on each generator class's cached dispatch table.
+
+    Generator.__init__ copies TRANSFORMS (plus the *_sql methods) into one dict per class, cached for the
+    process, and real lookups go through that copy (`self._dispatch.get(expression.__class__)`), not
+    through TRANSFORMS. The copy is keyed like TRANSFORMS, so its lookups are lookups of TRANSFORMS keys.
+    """
+    from sqlglot import generator
+
+    original = generator._build_dispatch
+
+    def build(cls):
+        rec = _RecordingDict(original(cls))
+        rec.owner = f"{cls.__module__}:{cls.__qualname__}"
+        rec.attr = "TRANSFORMS"
+        return rec
+
+    generator._build_dispatch = build
+
+
 def _install():
     from sqlglot import generator, parser, tokens
     from sqlglot import expressions as exp
@@ -305,6 +325,7 @@ def pytest_collection_finish(session):
     patched = _inline_process_pools()
     _install()
     _wrap_class_dicts()
+    _record_dispatch_tables()
     sys.addaudithook(_audit)
     print(f"br_plugin: process pools run in process in {patched}", file=sys.stderr)
 
