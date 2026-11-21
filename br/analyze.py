@@ -84,9 +84,9 @@ class Maps:
     def has_file(self, rel: str) -> bool:
         return rel in self._files
 
-    def has_import_time(self, rel: str) -> bool:
-        entry = self._files.get(rel)
-        return bool(entry and entry["import"])
+    def is_core(self, rel: str) -> bool:
+        """True when a bare `import sqlglot` loads this module, so a crash in it fails every test."""
+        return rel in self._core
 
     def spawners_for(self, rel: str) -> int:
         """Subprocess tests import sqlglot fresh, so only a change in a module that loads then can hurt them."""
@@ -214,7 +214,7 @@ class Analyzer:
             ntree = PyTree(new_text)
         except (SyntaxError, ValueError):
             if rel.startswith("sqlglot/"):
-                if maps.has_import_time(rel):
+                if maps.is_core(rel):
                     self.note(f"{rel}: new source does not parse, module is imported eagerly -> full suite")
                     return maps.full
                 m = self.module_mask(rel) | maps.opens_mask(rel)
@@ -362,8 +362,8 @@ class Analyzer:
                 m |= maps.lines_mask(rel, range(PyTree.start(stmt), stmt.end_lineno + 1))
             return m | maps.spawners_for(rel)
         # module level
-        if stmt is not None and isinstance(stmt, (ast.Import, ast.ImportFrom)) and maps.has_import_time(rel):
-            raise FullSuite(f"{rel}:{line} import statement changed in an eagerly imported module")
+        if stmt is not None and isinstance(stmt, (ast.Import, ast.ImportFrom)) and maps.is_core(rel):
+            raise FullSuite(f"{rel}:{line} import statement changed in a module that `import sqlglot` loads")
         if stmt is not None and tree.lambda_body_line(stmt, line):
             return maps.lines_mask(rel, range(PyTree.start(stmt), stmt.end_lineno + 1))
         return self.module_mask(rel) | maps.spawners_for(rel)
