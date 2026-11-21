@@ -124,3 +124,12 @@ Ground truth for the first batch was recomputed after the failure-summary parser
 - Lesson: h085 and h086 (edits in generator.py's _build_dispatch) were real misses of v1.11, unrelated to the check.
   A process-wide cache credits coverage to the first test that filled it. Fixed with the cache rule.
 - s014 and s015 (new method) on clean serial ground truth: s014 fails 7 distinct tests, all in the selection; s015 fails none.
+
+## v1.13: operator swaps proven harmless by value profiling
+- Full serial suite under the profiler: 1620 passed, 1 skipped (same as without), 51 minutes (test_max_nodes dominates).
+  29 process dumps; 1888 sites ran; 1326 never differed.
+- Sample: 2haz, 66ks and 2qn5 become free. 170.717 s -> 117.940 s, 0 misses. (fryt is ==/!= on a length, not a swap pair.)
+- 60 swap mutants over the whole package, ground truth with heavy tests run serially (no crash or unread entries):
+  40 at profiled-never-differs sites: 0 fail any test, all made free; 12 at sites where the profile saw a difference:
+  8 fail tests, none free, 0 misses; 8 at sites no test reaches: 0 fail, normal selection (no profile, so not free).
+- Six mutants took 14 to 36 minutes in the heavy tests (an infinite-loop-like change); they are real failures, kept.

@@ -38,6 +38,16 @@ image installs requirements.lock so sqlglot's tests can run. It is off by defaul
 Edits to code that fills a process-wide cache (generator.py's dispatch table) now widen to the module's users, because
 the coverage map credits only the first test that filled the cache (found by the heavy-test mutants h085 and h086).
 
+## Operator swaps the profile proves harmless (v1.13)
+
+During labeling, tools/labeler/cmpprofile.py rewrites every single-operator comparison in sqlglot (is, is not, ==, !=,
+<, <=, >, >=) to also compute what the swapped operator (is<->==, is not<->!=, <<-><=, >><->=>=) would have returned,
+and records whether the two ever differed over the whole suite, including import time and the child processes. About
+70% of the 1888 sites that ran never differed (maps/cmp.json.gz, 5 KB; tools/build_cmp.py).
+
+A commit that is one file, one changed line, and exactly the old file with one such operator swapped (compared as syntax
+trees) at a never-differing site selects only the tests that read the file's text. Anything else takes the normal path.
+
 ## Where the maps come from
 
 `maps/maps.json.gz` holds facts about sqlglot at the pinned commit, produced by `tools/build_all.sh`:

@@ -23,6 +23,7 @@ Rules, most precise first. "Tests" always means a set of test indexes (a bitmask
 from __future__ import annotations
 
 import ast
+import copy
 import re
 import gzip
 import json
@@ -71,6 +72,11 @@ class Maps:
         if os.path.exists(fields_path):
             with open(fields_path, encoding="utf-8") as f:
                 self._fields = json.load(f).get("files", {})
+        cmp_path = os.path.join(os.path.dirname(path), "cmp.json.gz")
+        self._cmp: dict[str, set[tuple[int, int]]] = {}
+        if os.path.exists(cmp_path):
+            with gzip.open(cmp_path, "rt", encoding="utf-8") as f:
+                self._cmp = {rel: {(a, b) for a, b in v} for rel, v in json.load(f)["sites"].items()}
         self.full = (1 << len(self.tests)) - 1
         self._sets = raw["sets"]
         self._masks: dict[int, int] = {}
@@ -117,6 +123,10 @@ class Maps:
             if test_id in self._index:
                 mask |= 1 << self._index[test_id]
         return mask
+
+    def comparison_sites(self, rel: str) -> set[tuple[int, int]]:
+        """(line, column) of comparisons whose swapped operator never changed a result in the whole suite."""
+        return self._cmp.get(rel, set())
 
     def has_file(self, rel: str) -> bool:
         return rel in self._files
@@ -200,6 +210,7 @@ class Analyzer:
         # edit inside a function body of a package file (nothing that runs at import, no test or data file).
         self.cover = 0
         self.body_only = True
+        self._single_patch = False
 
     def note(self, text: str):
         self.reasons.append(text)
@@ -222,6 +233,7 @@ class Analyzer:
         self.patched_sources = {}
         self._import_check = None
         self.cover, self.body_only = 0, True
+        self._single_patch = len(patches) == 1
         for fp in patches:  # the new text of each package source file, for the import check
             if fp.old_path and fp.new_path and fp.hunks and fp.path.startswith("sqlglot/") and fp.path.endswith(".py"):
                 try:
@@ -331,6 +343,14 @@ class Analyzer:
             self.body_only = False
             return m
 
+        if (self._single_patch and len(removed) == 1 and len(added) == 1 and rel.startswith("sqlglot/")
+                and self.provable_swap(rel, otree, ntree, removed[0])):
+            self.body_only = False
+            m = maps.opens_mask(rel)  # only a test that reads the source text could notice
+            self.note(f"{rel}:{removed[0]} operator swap the comparison profile proves harmless, tests that read the file: "
+                      f"{bin(m).count('1')}")
+            return m
+
         if len(removed) + len(added) > MAX_CHANGED_LINES:
             # A refactor this large will break a lot, and looking up every line costs CPU seconds.
             raise FullSuite(f"{rel}: {len(removed) + len(added)} changed lines")
@@ -367,6 +387,33 @@ class Analyzer:
                 mask = wide
                 self.note(f"{rel}: import-time statement that is not a plain literal -> module users")
         return mask
+
+    SWAP = {ast.Is: ast.Eq, ast.Eq: ast.Is, ast.IsNot: ast.NotEq, ast.NotEq: ast.IsNot,
+            ast.Lt: ast.LtE, ast.LtE: ast.Lt, ast.Gt: ast.GtE, ast.GtE: ast.Gt}
+
+    def provable_swap(self, rel: str, otree: PyTree, ntree: PyTree, line: int) -> bool:
+        """True when the new file is the old one with exactly one comparison's operator swapped (is<->==, is not<->!=,
+        <-><=, >->>=) at a site the labeling profile shows never changes a result (tools/labeler/cmpprofile.py).
+
+        The syntax trees are compared, so spacing and line breaks do not matter, but any other difference does.
+        """
+        sites = self.maps.comparison_sites(rel)
+        if not sites:
+            return False
+        nodes = list(ast.walk(otree.module))
+        found = [i for i, n in enumerate(nodes) if isinstance(n, ast.Compare) and len(n.ops) == 1
+                 and type(n.ops[0]) in self.SWAP and n.lineno <= line <= n.end_lineno]
+        if not found or len(found) > 4:
+            return False
+        target = ast.dump(ntree.module)
+        matched = []
+        for i in found:
+            copy_tree = copy.deepcopy(otree.module)
+            node = list(ast.walk(copy_tree))[i]
+            node.ops = [self.SWAP[type(node.ops[0])]()]
+            if ast.dump(copy_tree) == target:
+                matched.append(nodes[i])
+        return bool(matched) and all((n.lineno, n.col_offset) in sites for n in matched)
 
     CACHE_NAME = re.compile(r"cache", re.I)
 

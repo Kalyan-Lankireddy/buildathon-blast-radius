@@ -212,3 +212,24 @@ def test_verify_says_no_to_anything_but_a_clean_pass(tmp_path):
     assert not ok
     ok, _, _ = all_passed(str(tmp_path), {}, ["tests/test_a.py::test_missing"], 20, 30)
     assert not ok
+
+
+def test_a_provable_operator_swap_is_recognised_and_nothing_else_is():
+    from br.analyze import Analyzer
+
+    class Stub:
+        def __init__(self, sites):
+            self.sites = sites
+
+        def comparison_sites(self, rel):
+            return self.sites
+
+    old = "def f(x):\n    if x is None:\n        return 1\n    return (x < 3)\n"
+    an = Analyzer(Stub({(2, 7)}), "/nonexistent")
+    swap = lambda new: an.provable_swap("sqlglot/m.py", PyTree(old), PyTree(new), 2)
+    assert swap(old.replace("x is None", "x == None"))                # a swap at a profiled site
+    assert swap(old.replace("x is None", "x  ==  None"))              # spacing does not matter
+    assert not swap(old.replace("x is None", "x is not None"))        # not one of the paired swaps
+    assert not swap(old.replace("x is None", "y == None"))            # the swap plus another change
+    assert not Analyzer(Stub(set()), "/x").provable_swap("sqlglot/m.py", PyTree(old), PyTree(old.replace("is", "==")), 2)
+    assert not Analyzer(Stub({(4, 12)}), "/x").provable_swap("sqlglot/m.py", PyTree(old), PyTree(old.replace("is", "==")), 2)
