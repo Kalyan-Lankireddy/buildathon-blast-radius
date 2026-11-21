@@ -29,6 +29,7 @@ import os
 from collections import deque
 
 from .fixtures import changed_field
+from .importcheck import imports_cleanly
 from .patchparse import FilePatch, PatchError, apply_hunks
 from .pytree import PyTree
 
@@ -78,6 +79,8 @@ class Maps:
         self._opens = raw["opens"]
         self._listdirs = raw["listdirs"]
         self._attr_tests: dict[str, int] = raw.get("attr_tests", {})
+        # narrowable only because the dialect metaclass's use of them was traced; their dict keys also matter at import
+        self.attr_derived: set[str] = set(raw.get("attr_derived", []))
         self._dict_keys: dict[str, int] = raw.get("dict_keys", {})
         self._dict_iter: dict[str, int] = raw.get("dict_iter", {})
         self._wrapped = set(raw.get("wrapped_dicts", []))
@@ -188,6 +191,8 @@ class Analyzer:
         self.maps = maps
         self.root = src_root
         self.reasons: list[str] = []
+        self.patched_sources: dict[str, str] = {}
+        self._import_check: bool | None = None
         self._trees: dict[str, PyTree] = {}
 
     def note(self, text: str):
@@ -208,6 +213,14 @@ class Analyzer:
 
     # ---------------------------------------------------------------- entry point
     def select(self, patches: list[FilePatch]) -> int:
+        self.patched_sources = {}
+        self._import_check = None
+        for fp in patches:  # the new text of each package source file, for the import check
+            if fp.old_path and fp.new_path and fp.hunks and fp.path.startswith("sqlglot/") and fp.path.endswith(".py"):
+                try:
+                    self.patched_sources[os.path.join(self.root, fp.path)] = apply_hunks(self.read(fp.path), fp.hunks)[0]
+                except (FullSuite, PatchError):
+                    pass
         mask = 0
         for fp in patches:
             mask |= self.file_mask(fp)
@@ -310,7 +323,10 @@ class Analyzer:
         for r in removed:
             mask |= self.old_line_mask(rel, otree, r)
         replaced, pair_of = self.replacement_slots(otree, ntree, edit, added)
-        if self.import_time_risk(otree, ntree, removed, added, pair_of):
+        risky = self.import_time_risk(otree, ntree, removed, added, pair_of)
+        if risky and rel.startswith("sqlglot/") and self.package_imports_cleanly():
+            self.note(f"{rel}: import-time statement that is not a plain literal, but the patched package imports cleanly")
+        elif risky:
             # A change that runs while the module loads can crash the import. In a module that
             # `import sqlglot` loads that fails every test; elsewhere it fails the tests that import it.
             if maps.is_core(rel):
@@ -323,6 +339,14 @@ class Analyzer:
             # (in a class body the new line can name a different dict key than the old one, so it is mapped too)
             mask |= self.new_line_mask(rel, otree, ntree, a, prev_old, next_old)
         return mask
+
+    def package_imports_cleanly(self) -> bool:
+        """Import the patched package in a subprocess, once per commit. Anything but a clean run is a no."""
+        if self._import_check is None:
+            clean, detail = imports_cleanly(self.root, self.patched_sources)
+            self._import_check = clean
+            self.note(f"import check: {detail}")
+        return self._import_check
 
     @staticmethod
     def replacement_slots(otree: PyTree, ntree: PyTree, edit, added) -> tuple[set[int], dict[int, int]]:
@@ -612,6 +636,8 @@ class Analyzer:
             return None
         if not (isinstance(target, ast.Name) and isinstance(stmt.value, ast.Dict)):
             return None
+        if target.id in self.maps.attr_derived:
+            return None  # the metaclass reads which keys exist, so lookups at test time say nothing about an edit
         for key, value in zip(stmt.value.keys, stmt.value.values):
             first = key.lineno if key is not None else value.lineno
             if first <= line <= value.end_lineno:

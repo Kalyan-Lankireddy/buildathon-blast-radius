@@ -16,6 +16,7 @@ Track: RWX Blast Radius. Score is simulated CI seconds plus CPU seconds, lower i
 | v1.8 practice | not yet submitted | | | | |
 | v1.9 | edits to one `TRANSFORMS` entry select the tests that looked that key up (recorded on the dispatch table) | 170.717 s | 0 | see below | dict mutants 297.8 s to 236.2 s, 0 misses |
 | v1.10 | edits to one half of a pair-format SQL fixture select only the tests that read that half | 170.717 s | 0 | see below | four TPC fixture mutants 25.5 s to 4.2 / 7.9 s each, 0 misses |
+| v1.11 | an import-time statement that is not a plain literal widens only if the patched package fails to import | 170.717 s | 0 | see below | mutants: 0 misses; k and s mutants 81.8 s to 26.7 s and 181.4 s to 139.1 s |
 
 ## Lessons
 - Per-test coverage is blind to work done in child processes. `test_optimizer` and `test_executor` hand their
@@ -96,3 +97,18 @@ Ground truth for the first batch was recomputed after the failure-summary parser
   edits that touch both halves all keep "every test that opened the file". Blind spot: a C extension that reads a string
   buffer directly (duckdb.execute(sql)) is invisible to the recorder; for the executor tests the code ignores `expected`
   by unpacking it into `_`. Only the two TPC files change: the other 24 fixtures are read in full by every test.
+
+- Import check (v1.11). A statement that runs at import and is not a plain literal used to widen to every test that imports
+  the module, or to the full suite in a core module. `br/importcheck.py` now imports `sqlglot` and every module under it
+  in a subprocess, with all of the commit's patched files served by a loader hook (the disk is read-only). A clean import
+  drops the widening; any failure, timeout or error keeps it. m001 and m017, the two import-crash mutants, still widen
+  (TypeError). Costs about 0.5 s of CPU per risky commit with the package precompiled.
+- Derived attributes (built, not shipped). `tools/derive.py` follows the constants `_Dialect.__new__` reads into the class
+  attributes it writes, and `BR_DERIVE=1 tools/build_maps.py` narrows such a constant to the tests that read it or anything
+  derived from it. It narrowed nothing on the sample: NUMERIC_ESCAPES feeds ESCAPED_SEQUENCES, which the generator reads
+  for every string literal, so its readers are the same tests as the class's users. It reaches only rare constants
+  (FORMAT_MAPPING, CREATABLE_KIND_MAPPING). Building it exposed a bug worth keeping in mind: once a dict constant became
+  narrowable, dict-entry narrowing switched on for it, but the metaclass reads which keys exist at import, so lookups at test
+  time say nothing about an edit. Names narrowable only through derivation are now excluded from entry narrowing.
+- The new-method rule (a new method in a class body selects the class's users) was first validated with xdist and four
+  dropped crashed-worker entries. A clean serial rerun of those two mutants is queued behind the campaign.

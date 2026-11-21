@@ -17,6 +17,7 @@ The patch is read line by line, and each changed line is classified from the AST
 | one entry of a generator's `TRANSFORMS` | the tests that looked that key up in the class's table or its cached dispatch copy |
 | a module-level statement | the tests that ran code in the module, built its classes, or did so for its importers |
 | a line that also runs while modules load | the above, widened to the module's users |
+| a statement that runs at import and is not a plain literal | the patched package is imported in a subprocess; if that fails, the module's users and everything that imports it (the full suite in a module `import sqlglot` loads); if it imports cleanly, the normal rule for the line |
 | comments or blank lines only | the tests that read that file as text |
 | a data file (fixtures) | the tests that opened it; for an edit that plainly changes one half of a pair-format `.sql` fixture, only the tests that read that half |
 | anything we cannot read | the full suite |

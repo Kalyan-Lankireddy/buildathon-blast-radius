@@ -119,3 +119,56 @@ def test_fixture_edit_is_attributed_to_one_half_or_to_none():
     # both halves, a moved boundary, two statements on a line
     assert changed_field(text, text.replace("SELECT 1;", "SELECT 1").replace("SELECT 2;", "SELECT 2;;"), [2, 3], [2, 3]) is None
     assert changed_field("A;B;\n", "A;C;\n", [1], [1]) is None
+
+
+def test_derivation_follows_a_constant_through_locals_branches_and_loops():
+    import ast
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
+    from derive import trace
+
+    fn = ast.parse('''
+def new(klass):
+    escapes = klass.tokenizer_class.NUMERIC_ESCAPES
+    if "x" in escapes:
+        fmt = "a"
+    else:
+        fmt = ""
+    for code in range(3):
+        if code:
+            klass.ESCAPED.setdefault(chr(code), fmt.format(code))
+    klass.TRIE = new_trie(klass.TIME_MAPPING)
+    klass.FLAG = "\\\\" in klass.tokenizer_class.STRING_ESCAPES
+''').body[0]
+    derived, failed = trace(fn)
+    assert "NUMERIC_ESCAPES" in derived["ESCAPED"] and derived["TRIE"] == {"TIME_MAPPING"} and derived["FLAG"] == {"STRING_ESCAPES"}
+    assert not failed
+
+
+def test_derivation_gives_up_on_what_it_cannot_follow():
+    import ast
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
+    from derive import trace
+
+    fn = ast.parse('''
+def new(klass):
+    log.warning(klass.tokenizer_class.NUMERIC_ESCAPES)
+    other = mystery(klass.TIME_MAPPING)
+    return klass.STRING_ESCAPES
+''').body[0]
+    derived, failed = trace(fn)
+    assert failed == {"NUMERIC_ESCAPES", "TIME_MAPPING", "STRING_ESCAPES"}
+
+
+def test_import_check_accepts_a_clean_patch_and_rejects_one_that_crashes_the_import(tmp_path):
+    from br.importcheck import imports_cleanly
+
+    pkg = tmp_path / "sqlglot"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "mod.py").write_text("TABLE = {1: 'a'}\nOTHER = TABLE\n")
+    path = str(pkg / "mod.py")
+    assert imports_cleanly(str(tmp_path), {})[0] is True
+    assert imports_cleanly(str(tmp_path), {path: "TABLE = {1: 'b'}\nOTHER = TABLE\n"})[0] is True
+    clean, detail = imports_cleanly(str(tmp_path), {path: "TABLE = {1: 'a'}\nOTHER = TABLE - {1}\n"})
+    assert clean is False and "TypeError" in detail
+    assert imports_cleanly(str(tmp_path), {path: "def broken(:\n"})[0] is False

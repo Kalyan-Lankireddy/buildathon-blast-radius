@@ -18,6 +18,9 @@ import sys
 
 import coverage
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from derive import trace  # noqa: E402
+
 ROOT = os.environ.get("BR_ROOT", "/src/sqlglot")
 OUT = os.environ.get("BR_OUT", "/out")
 MAPS = os.environ.get("BR_MAPS", os.path.join(OUT, "maps.json.gz"))
@@ -109,14 +112,21 @@ IMPORT_TIME_FUNCTIONS = {"__new__", "__init_subclass__", "__set_name__", "__clas
 
 
 def attribute_reads(files, intern, sets):
-    """For each ALL_CAPS name, the tests that ran a line that reads it, if every read happens at test time.
+    """For each ALL_CAPS name, the tests that ran a line that reads it, if every read is understood.
 
     A class constant such as WEEK_OFFSET only matters to a test that reads it. A read counts when it is
     `x.NAME` or the string "NAME" (getattr, __dict__) inside a function body. If any read happens at import
-    time (class body, module level, a metaclass __new__), the value may be folded into other attributes
+    time (class body, module level, another import-time hook), the value may be folded into other attributes
     before any test runs, so the name is left out and callers fall back to the class's users.
+
+    One import-time reader is understood: the dialect metaclass `_Dialect.__new__`. tools/derive.py follows every
+    constant it reads into the class attributes it writes, and a constant narrows to the tests that read it OR
+    any attribute derived from it, provided each of those attributes is itself only read at test time (apart from
+    the metaclass, whose reads the tracer already followed) and the tracer could follow everything.
     """
+    derive = os.environ.get("BR_DERIVE") == "1"  # off by default: it narrowed nothing on the sample and mutants
     reads = {}
+    meta_fn = None
     for top_dir in ("sqlglot", "tests"):
         for dirpath, _, names in os.walk(os.path.join(ROOT, top_dir)):
             for name in names:
@@ -129,17 +139,24 @@ def attribute_reads(files, intern, sets):
                 for node in ast.walk(tree):
                     for child in ast.iter_child_nodes(node):
                         parent[child] = node
+                local_meta = None
+                if rel == "sqlglot/dialects/dialect.py":
+                    cls = next(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "_Dialect")
+                    local_meta = meta_fn = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__new__")
 
                 def climb(node):
                     func = stmt = None
+                    in_meta = False
                     cur = node
                     while cur is not None:
                         if stmt is None and isinstance(cur, ast.stmt):
                             stmt = cur
                         if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
                             func = func or cur
+                        if local_meta is not None and cur is local_meta:
+                            in_meta = True
                         cur = parent.get(cur)
-                    return func, stmt
+                    return func, stmt, in_meta
 
                 for node in ast.walk(tree):
                     found = None
@@ -151,26 +168,50 @@ def attribute_reads(files, intern, sets):
                         found = node.id  # only a class attribute when read inside a class body (import time)
                     if found is None:
                         continue
-                    func, stmt = climb(node)
-                    entry = reads.setdefault(found, {"unsafe": False, "lines": set()})
+                    func, stmt, in_meta = climb(node)
+                    entry = reads.setdefault(found, {"unsafe": False, "meta": False, "lines": set()})
                     if isinstance(node, ast.Name) and func is not None:
                         continue  # a bare global inside a function is not a class attribute
+                    if in_meta:
+                        if derive:
+                            entry["meta"] = True  # read while a dialect class is being created; traced separately
+                        else:
+                            entry["unsafe"] = True
+                        continue
                     if func is None or getattr(func, "name", "") in IMPORT_TIME_FUNCTIONS:
                         entry["unsafe"] = True
                         continue
                     first = min([stmt.lineno] + [d.lineno for d in getattr(stmt, "decorator_list", [])])
                     entry["lines"].update((rel, ln) for ln in range(first, stmt.end_lineno + 1))
-    out = {}
-    for name, entry in reads.items():
-        if entry["unsafe"] or not entry["lines"]:
-            continue
+
+    derived, untraced = trace(meta_fn) if meta_fn is not None else ({}, set())
+
+    def tests_of(name):
         members = set()
-        for rel, ln in entry["lines"]:
+        for rel, ln in reads.get(name, {"lines": ()})["lines"]:
             sid = files.get(rel, {}).get("lines", {}).get(str(ln))
             if sid is not None:
                 members.update(sets[sid])
+        return members
+
+    out, derived_names = {}, []
+    for name, entry in reads.items():
+        if entry["unsafe"] or name in untraced:
+            continue
+        members = tests_of(name)
+        feeds = sorted(a for a, sources in derived.items() if name in sources and a != name)
+        if entry["meta"] or feeds:
+            # understood only if every attribute it feeds is read at test time (and by the metaclass) and nowhere else
+            if any(reads.get(a, {"unsafe": True})["unsafe"] or a in untraced for a in feeds):
+                continue
+            for a in feeds:
+                members |= tests_of(a)
+        if not entry["lines"] and not entry["meta"] and not feeds:
+            continue
         out[name] = intern(members)
-    return out
+        if entry["meta"] or feeds:
+            derived_names.append(name)
+    return out, sorted(derived_names)
 
 
 def wrapped_dicts():
@@ -377,7 +418,7 @@ def main():
                 listdirs.setdefault(d, set()).update(shared)
 
     importers_top, importers_local = import_graph()
-    attribute_tests = attribute_reads(files, intern, sets)
+    attribute_tests, attribute_derived = attribute_reads(files, intern, sets)
     maps = {
         "tests": ids,
         "sets": sets,
@@ -387,6 +428,7 @@ def main():
         "listdirs": {k: intern(v) for k, v in sorted(listdirs.items())},
         "class_owners": class_owners(),
         "attr_tests": attribute_tests,
+        "attr_derived": attribute_derived,
         "dict_keys": {k: intern(v) for k, v in sorted(dict_keys.items())},
         "dict_iter": {k: intern(v) for k, v in sorted(dict_iter.items())},
         "descendants": descendants(),
