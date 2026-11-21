@@ -78,5 +78,10 @@ Ground truth for the first batch was recomputed after the failure-summary parser
   and the new key of an edited line are both mapped. The import-crash rule no longer treats an entry as risky when only
   literal values changed and its only calls (outside lambdas) are `rename_func`, which ignores its argument; calls such as
   `maybe_parse("...")` still count, because that is how a string edit once broke an import.
-  Evidence: 12 `TRANSFORMS`/mapping entry mutants, 0 misses, 297.8 s down to 236.2 s. Not yet validated: edits to an
-  entry's key, and deleted entries. Those are mapped through the same code but have no ground truth yet.
+  Evidence: 12 `TRANSFORMS`/mapping entry mutants, 0 misses, 297.8 s down to 236.2 s; plus 3 edited keys and 3 deleted
+  entries, 0 misses (those take the wide path, since a changed key is not a literal-only edit).
+
+## Harness totals at v1.9
+78 mutants with usable ground truth, 0 misses: 24 source edits, 8 test-file and fixture edits, 17 structural edits,
+6 string edits and reruns, 17 dict-entry edits and reruns, 6 edited keys and deleted entries. Ten structural mutants
+(base class, decorator, annotation, new file, multi-file) were left unfinished; probes of each by hand widen as intended.

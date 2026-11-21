@@ -14,6 +14,7 @@ The patch is read line by line, and each changed line is classified from the AST
 | a function header or decorator | the tests that executed any line of the function |
 | a class body statement | the tests that built that class (or a subclass) and its dialect |
 | `NAME = ...` in a class body | those tests, narrowed to ones that ran a line reading `NAME` |
+| one entry of a generator's `TRANSFORMS` | the tests that looked that key up in the class's table or its cached dispatch copy |
 | a module-level statement | the tests that ran code in the module, built its classes, or did so for its importers |
 | a line that also runs while modules load | the above, widened to the module's users |
 | comments or blank lines only | the tests that read that file as text |
