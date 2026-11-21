@@ -33,7 +33,7 @@ process (br/verify.py, with br/verify_plugin.py serving the patched sources over
 passes, the heavy tests (3 s or more) and the verified cheap tests leave the CI selection. Any failure, error, skip,
 timeout, CPU kill (10 s), crash or exhausted budget (half the time limit) keeps the normal selection. It only starts
 when it could save at least 8 s of CI time, and it stops trying when wasted runs outnumber twice the passes by 5. The
-image installs requirements.lock so sqlglot's tests can run. Set BR_VERIFY=0 to turn it off.
+image installs requirements.lock so sqlglot's tests can run. It is off by default (practice showed it never paid); BR_VERIFY=1 turns it on.
 
 Edits to code that fills a process-wide cache (generator.py's dispatch table) now widen to the module's users, because
 the coverage map credits only the first test that filled the cache (found by the heavy-test mutants h085 and h086).

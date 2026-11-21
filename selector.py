@@ -27,7 +27,7 @@ DATA = Path(os.environ.get("BR_DATA", "/data"))
 SRC = os.environ.get("BR_SRC", "/opt/sqlglot")
 MAPS = os.environ.get("BR_MAPS", str(HERE / "maps" / "maps.json.gz"))
 EXPLAIN = bool(os.environ.get("BR_EXPLAIN"))
-VERIFY = os.environ.get("BR_VERIFY", "1") != "0"
+VERIFY = os.environ.get("BR_VERIFY", "0") == "1"
 
 # The local check (see verify_choice): a heavy test is dropped from the CI selection only when the cheap tests that
 # run the same changed lines pass on the patched code.
