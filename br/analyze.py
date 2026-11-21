@@ -193,6 +193,7 @@ class Analyzer:
         self.reasons: list[str] = []
         self.patched_sources: dict[str, str] = {}
         self._import_check: bool | None = None
+        self.cost_fn = None  # set by the selector: a mask of tests -> its CI cost in seconds
         self._trees: dict[str, PyTree] = {}
 
     def note(self, text: str):
@@ -324,21 +325,31 @@ class Analyzer:
             mask |= self.old_line_mask(rel, otree, r)
         replaced, pair_of = self.replacement_slots(otree, ntree, edit, added)
         risky = self.import_time_risk(otree, ntree, removed, added, pair_of)
-        if risky and rel.startswith("sqlglot/") and self.package_imports_cleanly():
-            self.note(f"{rel}: import-time statement that is not a plain literal, but the patched package imports cleanly")
-        elif risky:
-            # A change that runs while the module loads can crash the import. In a module that
-            # `import sqlglot` loads that fails every test; elsewhere it fails the tests that import it.
-            if maps.is_core(rel):
-                raise FullSuite(f"{rel}: import-time statement that is not a plain literal, in a core module")
-            mask |= self.module_mask(rel, depth_limit=None) | maps.spawners_for(rel)
-            self.note(f"{rel}: import-time statement that is not a plain literal -> module users")
         for a, prev_old, next_old in added:
             if a in replaced and ntree.scope_of(a).kind != "classbody":
                 continue  # takes the place of a removed line: that line's own tests already count
             # (in a class body the new line can name a different dict key than the old one, so it is mapped too)
             mask |= self.new_line_mask(rel, otree, ntree, a, prev_old, next_old)
+        if risky:
+            # A change that runs while the module loads can crash the import. In a module that
+            # `import sqlglot` loads that fails every test; elsewhere it fails the tests that import it.
+            wide = maps.full if maps.is_core(rel) else mask | self.module_mask(rel, depth_limit=None) | maps.spawners_for(rel)
+            if rel.startswith("sqlglot/") and self.check_is_worth_it(mask, wide) and self.package_imports_cleanly():
+                self.note(f"{rel}: import-time statement that is not a plain literal, but the patched package imports cleanly")
+            elif maps.is_core(rel):
+                raise FullSuite(f"{rel}: import-time statement that is not a plain literal, in a core module")
+            else:
+                mask = wide
+                self.note(f"{rel}: import-time statement that is not a plain literal -> module users")
         return mask
+
+    CHECK_WORTH_SECONDS = 1.5  # the import check costs about 0.7 s of CPU; skip it unless it could save clearly more
+
+    def check_is_worth_it(self, narrow: int, wide: int) -> bool:
+        """Run the subprocess only when the wide selection costs clearly more in CI than the narrow one."""
+        if self.cost_fn is None:
+            return True
+        return self.cost_fn(wide) - self.cost_fn(narrow) >= self.CHECK_WORTH_SECONDS
 
     def package_imports_cleanly(self) -> bool:
         """Import the patched package in a subprocess, once per commit. Anything but a clean run is a no."""

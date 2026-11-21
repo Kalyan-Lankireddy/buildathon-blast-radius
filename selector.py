@@ -53,10 +53,15 @@ def main() -> None:
             i += 1
         return out
 
+    def ci_seconds(mask: int) -> float:
+        workers = [w for w in pack(sorted(set(numbers(mask)) | set(missing)), ms) if w]
+        return 0.0 if not workers else (max(sum(ms[n] for n in w) for w in workers) + 2000 * len(workers)) / 1000
+
     full_packed = pack(all_numbers, ms)
     full_selected = 0
     for patch in sorted((DATA / "commits").glob("*.patch")):
         analyzer = Analyzer(maps, SRC)
+        analyzer.cost_fn = ci_seconds
         try:
             files = parse_patch(patch.read_text(encoding="utf-8"))
             mask = analyzer.select(files)
