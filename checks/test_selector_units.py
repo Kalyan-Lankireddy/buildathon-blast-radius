@@ -75,4 +75,15 @@ def test_uncommenting_code_is_not_treated_as_a_replacement():
         "@@ -1,3 +1,3 @@\n def f():\n-    # x = g()\n+    x = g()\n     return 1\n")
     _, edit = apply_hunks("def f():\n    # x = g()\n    return 1\n", fp.hunks)
     added = [(a, p, n) for a, p, n in edit.added]
-    assert Analyzer.replacement_slots(old, new, edit, added) == set()
+    slots, paired = Analyzer.replacement_slots(old, new, edit, added)
+    assert slots == set() and paired == set()
+
+
+def test_literal_only_separates_safe_import_time_statements():
+    from br.analyze import Analyzer
+
+    parse = lambda src: PyTree(src).module.body[0]  # noqa: E731
+    assert Analyzer.literal_only(parse("X = {'a': (1, 2), 'b': [True, None, -3]}"))
+    assert not Analyzer.literal_only(parse("X = Y - {1}"))
+    assert not Analyzer.literal_only(parse("X = [p + q for q in Q]"))
+    assert not Analyzer.literal_only(parse("def f(): pass"))

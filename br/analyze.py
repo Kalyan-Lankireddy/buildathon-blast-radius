@@ -183,6 +183,10 @@ class Analyzer:
             return maps.full
         is_py = path.endswith(".py") and path.startswith(("sqlglot/", "tests/"))
         if fp.old_path is None:  # a new file
+            if path.startswith("sqlglot/"):
+                # A new package file could be picked up by a directory scan or an import we cannot see.
+                self.note(f"{path}: new file in the package -> full suite")
+                return maps.full
             m = maps.listdir_mask(path)
             self.note(f"{path}: new file, tests that list its directory: {bin(m).count('1')}")
             return m
@@ -239,7 +243,14 @@ class Analyzer:
         mask = 0
         for r in removed:
             mask |= self.old_line_mask(rel, otree, r)
-        replaced = self.replacement_slots(otree, ntree, edit, added)
+        replaced, paired_old = self.replacement_slots(otree, ntree, edit, added)
+        if self.import_time_risk(otree, ntree, removed, added, paired_old):
+            # A change that runs while the module loads can crash the import. In a module that
+            # `import sqlglot` loads that fails every test; elsewhere it fails the tests that import it.
+            if maps.is_core(rel):
+                raise FullSuite(f"{rel}: import-time statement that is not a plain literal, in a core module")
+            mask |= self.module_mask(rel) | maps.spawners_for(rel)
+            self.note(f"{rel}: import-time statement that is not a plain literal -> module users")
         for a, prev_old, next_old in added:
             if a in replaced:
                 continue  # takes the place of a removed line: that line's own tests already count
@@ -247,7 +258,7 @@ class Analyzer:
         return mask
 
     @staticmethod
-    def replacement_slots(otree: PyTree, ntree: PyTree, edit, added) -> set[int]:
+    def replacement_slots(otree: PyTree, ntree: PyTree, edit, added) -> tuple[set[int], set[int]]:
         """Added lines that replace a removed line, in the same kind of place.
 
         A replaced line sits where the old line sat, so the same tests reach it. Only genuine
@@ -260,6 +271,7 @@ class Analyzer:
         for a, prev_old, _ in added:
             by_slot.setdefault(prev_old, []).append(a)
         slots: set[int] = set()
+        paired: set[int] = set()
         for prev_old, new_lines in by_slot.items():
             block, p = [], prev_old
             while p in removed:
@@ -278,7 +290,55 @@ class Analyzer:
                     same = True
                 if same:
                     slots.add(new_line)
-        return slots
+                    paired.add(old_line)
+        return slots, paired
+
+    IMPORT_KINDS = ("classbody", "classheader", "funcheader", "module")
+
+    def import_time_risk(self, otree: PyTree, ntree: PyTree, removed, added, paired_old) -> bool:
+        """True when a change could make the module fail to import.
+
+        Statements outside function bodies run when the module loads. A plain literal (numbers,
+        strings, containers of them) cannot fail. Anything else can: a name that no longer exists,
+        arithmetic on the wrong types, a base class that changed. A deleted statement can leave
+        a name undefined.
+        """
+        for r in removed:
+            if r in paired_old:
+                continue
+            sc = otree.scope_of(r)
+            if sc.kind in self.IMPORT_KINDS and not self.harmless_here(otree, sc, r):
+                return True
+        for a, _, _ in added:
+            sc = ntree.scope_of(a)
+            if sc.kind in self.IMPORT_KINDS and not self.harmless_here(ntree, sc, a) and not self.literal_only(sc.stmt):
+                return True
+        return False
+
+    def harmless_here(self, tree: PyTree, scope, line: int) -> bool:
+        stmt = scope.stmt
+        if stmt is None:
+            return False
+        return self.type_checking_only(tree, stmt) or tree.lambda_body_line(stmt, line)
+
+    @staticmethod
+    def literal_only(stmt) -> bool:
+        """An assignment whose value is built only from constants and containers of constants."""
+        if isinstance(stmt, ast.Assign):
+            value = stmt.value
+        elif isinstance(stmt, (ast.AnnAssign, ast.AugAssign)):
+            value = stmt.value
+        else:
+            return False
+        if value is None:
+            return True
+        allowed = (ast.Constant, ast.Dict, ast.List, ast.Tuple, ast.Set, ast.UnaryOp, ast.UAdd, ast.USub,
+                   ast.Not, ast.Invert, ast.Load)
+        return all(isinstance(node, allowed) for node in ast.walk(value))
+
+    @staticmethod
+    def bare_string(stmt) -> bool:
+        return isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str)
 
     def old_line_mask(self, rel: str, otree: PyTree, line: int) -> int:
         scope = otree.scope_of(line)
@@ -288,6 +348,8 @@ class Analyzer:
 
     def new_line_mask(self, rel, otree, ntree, line, prev_old, next_old) -> int:
         scope = ntree.scope_of(line)
+        if self.bare_string(scope.stmt):
+            return self.maps.opens_mask(rel)  # see scope_mask: a docstring is read by nothing
         if scope.kind in ("runtime", "funcheader"):
             qual = ntree.qualname(scope.func)
             old_fn = otree.functions.get(qual)
@@ -344,6 +406,12 @@ class Analyzer:
         stmt = scope.stmt
         if self.type_checking_only(tree, stmt):
             return 0
+        if self.bare_string(stmt):
+            # A docstring or other bare string statement runs no code. Coverage cannot see it, and nothing
+            # reads it as data: the suite has no doctests (tests/test_docs.py defines no pytest tests) and
+            # `__doc__` is only assigned in sqlglot/expressions/core.py, never inspected. Mutants that edit
+            # docstrings failed no test. So it counts like a comment: only tests that read the file as text.
+            return maps.opens_mask(rel)
         if scope.kind == "runtime":
             if in_old:
                 lines = tree.own_lines(stmt)

@@ -93,6 +93,8 @@ def import_graph():
                     edge(base, rel, inner)
                     for alias in child.names:
                         edge(f"{base}.{alias.name}", rel, inner)
+                        # `from sqlglot.dialects import BigQuery` loads sqlglot/dialects/bigquery.py lazily
+                        edge(f"{base}.{alias.name.lower()}", rel, inner)
                 visit(child, inner)
 
         visit(tree, None)
