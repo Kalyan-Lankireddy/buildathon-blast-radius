@@ -61,6 +61,8 @@ class Maps:
         self._opens = raw["opens"]
         self._listdirs = raw["listdirs"]
         self._attr_tests: dict[str, int] = raw.get("attr_tests", {})
+        self._spawners = self.mask(raw.get("spawn_tests"))  # tests that start a subprocess
+        self._core = set(raw.get("core_modules", []))  # files that a bare `import sqlglot` loads
         self.class_owners: dict[str, list[str]] = raw.get("class_owners", {})
         self.importers: dict[str, list[str]] = raw.get("importers", {})
         self.local_importers: dict[str, list[list]] = raw.get("local_importers", {})
@@ -85,6 +87,14 @@ class Maps:
     def has_import_time(self, rel: str) -> bool:
         entry = self._files.get(rel)
         return bool(entry and entry["import"])
+
+    def spawners_for(self, rel: str) -> int:
+        """Subprocess tests import sqlglot fresh, so only a change in a module that loads then can hurt them."""
+        return self._spawners if rel in self._core else 0
+
+    def import_lines(self, rel: str) -> set[int]:
+        entry = self._files.get(rel)
+        return set(entry["import"]) if entry else set()
 
     def line_table(self, rel: str) -> dict[int, int]:
         if rel not in self._lines:
@@ -223,9 +233,45 @@ class Analyzer:
         mask = 0
         for r in removed:
             mask |= self.old_line_mask(rel, otree, r)
+        replaced = self.replacement_slots(otree, ntree, edit, added)
         for a, prev_old, next_old in added:
+            if a in replaced:
+                continue  # takes the place of a removed line: that line's own tests already count
             mask |= self.new_line_mask(rel, otree, ntree, a, prev_old, next_old)
         return mask
+
+    @staticmethod
+    def replacement_slots(otree: PyTree, ntree: PyTree, edit, added) -> set[int]:
+        """Added lines that replace a removed line, in the same kind of place.
+
+        A replaced line sits where the old line sat, so the same tests reach it. Only genuine
+        insertions (more added than removed lines, or a different kind of place) need the
+        neighbour rule, which is wider.
+        """
+        removed = set(edit.removed)
+        by_slot: dict[int, list[int]] = {}
+        for a, prev_old, _ in added:
+            by_slot.setdefault(prev_old, []).append(a)
+        slots: set[int] = set()
+        for prev_old, new_lines in by_slot.items():
+            block, p = [], prev_old
+            while p in removed:
+                block.append(p)
+                p -= 1
+            block.reverse()  # the run of removed lines this group of added lines follows
+            for old_line, new_line in zip(block, new_lines):
+                o, n = otree.scope_of(old_line), ntree.scope_of(new_line)
+                if o.kind != n.kind:
+                    continue
+                if o.kind in ("runtime", "funcheader"):
+                    same = otree.qualname(o.func) == ntree.qualname(n.func)
+                elif o.kind in ("classbody", "classheader"):
+                    same = o.cls == n.cls
+                else:
+                    same = True
+                if same:
+                    slots.add(new_line)
+        return slots
 
     def old_line_mask(self, rel: str, otree: PyTree, line: int) -> int:
         scope = otree.scope_of(line)
@@ -276,6 +322,13 @@ class Analyzer:
             mask |= maps.lines_mask(rel, otree.own_lines(stmt))
         if not found:
             mask = maps.lines_mask(rel, range(lo, hi + 1))
+        touched = set(range(lo, hi + 1)) if not found else set()
+        for ln in (prev_old, next_old):
+            stmt = otree.innermost(ln) if ln >= 1 else None
+            if stmt is not None and stmt is not old_fn:
+                touched.update(otree.own_lines(stmt))
+        if maps.import_lines(rel).intersection(touched):
+            mask |= self.module_mask(rel) | maps.spawners_for(rel)
         return mask
 
     # ---------------------------------------------------------------- scope rules
@@ -286,13 +339,18 @@ class Analyzer:
             return 0
         if scope.kind == "runtime":
             if in_old:
-                return maps.lines_mask(rel, tree.own_lines(stmt))
+                lines = tree.own_lines(stmt)
+                m = maps.lines_mask(rel, lines)
+                if maps.import_lines(rel).intersection(lines):
+                    # this line also runs while modules load, so what it computes feeds every user of them
+                    m |= self.module_mask(rel) | maps.spawners_for(rel)
+                return m
             return maps.lines_mask(rel, range(PyTree.start(scope.func), scope.func.end_lineno + 1))
         if scope.kind == "funcheader":
             fn = scope.func
-            return maps.lines_mask(rel, range(PyTree.start(fn), fn.end_lineno + 1))
+            return maps.lines_mask(rel, range(PyTree.start(fn), fn.end_lineno + 1)) | maps.spawners_for(rel)
         if scope.kind == "classheader":
-            return self.class_mask(rel, scope.cls)
+            return self.class_mask(rel, scope.cls) | maps.spawners_for(rel)
         if scope.kind == "classbody":
             if stmt is not None and tree.lambda_body_line(stmt, line):
                 return maps.lines_mask(rel, range(PyTree.start(stmt), stmt.end_lineno + 1))
@@ -302,13 +360,13 @@ class Analyzer:
                 if narrowed is not None:
                     m &= narrowed  # a test must use the class AND read the constant
                 m |= maps.lines_mask(rel, range(PyTree.start(stmt), stmt.end_lineno + 1))
-            return m
+            return m | maps.spawners_for(rel)
         # module level
         if stmt is not None and isinstance(stmt, (ast.Import, ast.ImportFrom)) and maps.has_import_time(rel):
             raise FullSuite(f"{rel}:{line} import statement changed in an eagerly imported module")
         if stmt is not None and tree.lambda_body_line(stmt, line):
             return maps.lines_mask(rel, range(PyTree.start(stmt), stmt.end_lineno + 1))
-        return self.module_mask(rel)
+        return self.module_mask(rel) | maps.spawners_for(rel)
 
     def attribute_readers(self, tree: PyTree, stmt) -> int | None:
         """For `NAME = ...` directly in a class body: the tests that ran a line reading NAME.

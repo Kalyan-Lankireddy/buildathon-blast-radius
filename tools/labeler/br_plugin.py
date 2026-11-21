@@ -21,7 +21,8 @@ ROOT = os.environ.get("BR_ROOT", "/src/sqlglot") + os.sep
 OUT = os.environ.get("BR_OUT", "/out")
 WORKER = os.environ.get("PYTEST_XDIST_WORKER", "main")
 
-_state = {"active": False, "classes": set(), "opens": set(), "listdirs": set()}
+_state = {"active": False, "classes": set(), "opens": set(), "listdirs": set(), "spawns": False}
+SPAWN_EVENTS = {"subprocess.Popen", "os.system", "os.fork", "os.posix_spawn", "os.exec", "os.spawn"}
 
 
 def _rel(path):
@@ -42,7 +43,9 @@ def _rel(path):
 def _audit(event, args):
     if not _state["active"]:
         return
-    if event == "open":
+    if event in SPAWN_EVENTS:
+        _state["spawns"] = True
+    elif event == "open":
         rel = _rel(args[0]) if isinstance(args[0], (str, os.PathLike)) else None
         if rel is not None and not rel.endswith(".pyc"):
             _state["opens"].add(rel)
@@ -154,6 +157,26 @@ def _inline_process_pools():
     return patched
 
 
+def _import_every_module():
+    """Import every dialect, parser, generator and typing module now, outside any test.
+
+    Dialects load lazily inside the first test that needs them, which would credit all of a module's
+    import-time lines (class bodies, helpers the metaclass calls) to that one test. Importing them here
+    records those lines as import-time, which is what they are.
+    """
+    import importlib
+
+    root = os.path.join(os.environ.get("BR_ROOT", "/src/sqlglot"), "sqlglot")
+    for package in ("dialects", "parsers", "generators", "typing", "optimizer", "executor", "expressions"):
+        directory = os.path.join(root, package)
+        for name in sorted(os.listdir(directory)):
+            if name.endswith(".py") and name != "__init__.py":
+                try:
+                    importlib.import_module(f"sqlglot.{package}.{name[:-3]}")
+                except Exception as error:  # a module that cannot import on its own is simply skipped
+                    print(f"br_plugin: could not import sqlglot.{package}.{name[:-3]}: {error}", file=sys.stderr)
+
+
 def _class_names(classes):
     names = set()
     for cls in classes:
@@ -166,6 +189,7 @@ def _class_names(classes):
 
 def pytest_collection_finish(session):
     # After collection, so the import-time lines have already been recorded by coverage.
+    _import_every_module()
     patched = _inline_process_pools()
     _install()
     sys.addaudithook(_audit)
@@ -177,6 +201,7 @@ def pytest_runtest_protocol(item, nextitem):
     _state["classes"] = set()
     _state["opens"] = set()
     _state["listdirs"] = set()
+    _state["spawns"] = False
     _state["active"] = True
     try:
         yield
@@ -187,6 +212,7 @@ def pytest_runtest_protocol(item, nextitem):
             "classes": _class_names(_state["classes"]),
             "opens": sorted(_state["opens"]),
             "listdirs": sorted(_state["listdirs"]),
+            "spawns": _state["spawns"],
         }
         os.makedirs(OUT, exist_ok=True)
         with open(os.path.join(OUT, f"meta-{WORKER}.jsonl"), "a", encoding="utf-8") as f:

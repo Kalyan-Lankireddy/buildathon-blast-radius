@@ -161,6 +161,22 @@ def attribute_reads(files, intern, sets):
     return out
 
 
+def core_modules():
+    """Files of the modules a bare `import sqlglot` loads. A subprocess test can only be hurt by these."""
+    import subprocess
+
+    out = subprocess.run(
+        [sys.executable, "-c", "import sqlglot, sys; print('\\n'.join(sorted(m for m in sys.modules if m.startswith('sqlglot'))))"],
+        env=dict(os.environ, PYTHONPATH=ROOT), capture_output=True, text=True, check=True).stdout.split()
+    files = set()
+    for module in out:
+        base = os.path.join(*module.split("."))
+        for candidate in (base + ".py", os.path.join(base, "__init__.py")):
+            if os.path.exists(os.path.join(ROOT, candidate)):
+                files.add(candidate)
+    return sorted(files)
+
+
 def class_owners():
     """A dialect-specific Tokenizer/Parser/Generator class belongs to the dialects that use it."""
     sys.path.insert(0, ROOT)
@@ -226,7 +242,7 @@ def main():
             "any": intern(union) if union else None,
         }
 
-    classes, opens, listdirs = {}, {}, {}
+    classes, opens, listdirs, spawners = {}, {}, {}, set()
     seen_tests = set()
     for meta in glob.glob(os.path.join(OUT, "meta-*.jsonl")):
         for line in open(meta, encoding="utf-8"):
@@ -235,6 +251,8 @@ def main():
                 continue
             t = index[rec["id"]]
             seen_tests.add(t)
+            if rec.get("spawns"):
+                spawners.add(t)
             for c in rec["classes"]:
                 classes.setdefault(c, set()).add(t)
             for o in rec["opens"]:
@@ -253,6 +271,8 @@ def main():
         "listdirs": {k: intern(v) for k, v in sorted(listdirs.items())},
         "class_owners": class_owners(),
         "attr_tests": attribute_tests,
+        "spawn_tests": intern(spawners),
+        "core_modules": core_modules(),
         "importers": importers_top,
         "local_importers": importers_local,
     }
