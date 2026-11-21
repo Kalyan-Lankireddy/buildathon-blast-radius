@@ -23,6 +23,7 @@ Rules, most precise first. "Tests" always means a set of test indexes (a bitmask
 from __future__ import annotations
 
 import ast
+import re
 import gzip
 import json
 import os
@@ -195,6 +196,10 @@ class Analyzer:
         self._import_check: bool | None = None
         self.cost_fn = None  # set by the selector: a mask of tests -> its CI cost in seconds
         self._trees: dict[str, PyTree] = {}
+        # For the local check (selector.py): tests that run the changed lines, and whether every edit is a plain
+        # edit inside a function body of a package file (nothing that runs at import, no test or data file).
+        self.cover = 0
+        self.body_only = True
 
     def note(self, text: str):
         self.reasons.append(text)
@@ -216,6 +221,7 @@ class Analyzer:
     def select(self, patches: list[FilePatch]) -> int:
         self.patched_sources = {}
         self._import_check = None
+        self.cover, self.body_only = 0, True
         for fp in patches:  # the new text of each package source file, for the import check
             if fp.old_path and fp.new_path and fp.hunks and fp.path.startswith("sqlglot/") and fp.path.endswith(".py"):
                 try:
@@ -230,6 +236,12 @@ class Analyzer:
         return mask
 
     def file_mask(self, fp: FilePatch) -> int:
+        if not (fp.path.endswith(".py") and fp.path.startswith("sqlglot/") and fp.old_path and fp.new_path
+                and not fp.renamed and not fp.binary and fp.hunks):
+            self.body_only = False
+        return self._file_mask(fp)
+
+    def _file_mask(self, fp: FilePatch) -> int:
         maps = self.maps
         path = fp.path
         if fp.binary:
@@ -308,6 +320,7 @@ class Analyzer:
             else:
                 m = maps.any_mask(rel) | maps.opens_mask(rel)
             self.note(f"{rel}: new source does not parse, tests {bin(m).count('1')}")
+            self.body_only = False
             return m
 
         removed = [r for r in edit.removed if not otree.is_comment_or_blank(r)]
@@ -315,16 +328,28 @@ class Analyzer:
         if not removed and not added:
             m = maps.opens_mask(rel)
             self.note(f"{rel}: comments or blank lines only, tests that read the file: {bin(m).count('1')}")
+            self.body_only = False
             return m
 
         if len(removed) + len(added) > MAX_CHANGED_LINES:
             # A refactor this large will break a lot, and looking up every line costs CPU seconds.
             raise FullSuite(f"{rel}: {len(removed) + len(added)} changed lines")
         mask = 0
+        if rel.startswith("sqlglot/") and self.touches_shared_cache(otree, ntree, removed, added):
+            # A table filled once per process and reused (generator.py's _DISPATCH_CACHE): the coverage map credits
+            # only the test that happened to fill it first, but every later test reads what was filled.
+            if maps.is_core(rel):
+                raise FullSuite(f"{rel}: edits code that fills a process-wide cache, in a core module")
+            mask |= self.module_mask(rel, depth_limit=None)
+            self.note(f"{rel}: edits code that fills a process-wide cache -> module users")
+            self.body_only = False
         for r in removed:
             mask |= self.old_line_mask(rel, otree, r)
         replaced, pair_of = self.replacement_slots(otree, ntree, edit, added)
         risky = self.import_time_risk(otree, ntree, removed, added, pair_of)
+        if risky or any(otree.scope_of(r).kind != "runtime" for r in removed) \
+                or any(ntree.scope_of(a).kind != "runtime" or self.bare_string(ntree.scope_of(a).stmt) for a, _, _ in added):
+            self.body_only = False
         for a, prev_old, next_old in added:
             if a in replaced and ntree.scope_of(a).kind != "classbody":
                 continue  # takes the place of a removed line: that line's own tests already count
@@ -342,6 +367,44 @@ class Analyzer:
                 mask = wide
                 self.note(f"{rel}: import-time statement that is not a plain literal -> module users")
         return mask
+
+    CACHE_NAME = re.compile(r"cache", re.I)
+
+    @classmethod
+    def cache_fill_spans(cls, tree: PyTree) -> list[tuple[int, int]]:
+        """Line spans of module-level cache variables and of the functions that fill them (and what those call)."""
+        names = set()
+        spans = []
+        for node in tree.module.body:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, ast.AnnAssign) else []
+            for t in targets:
+                if isinstance(t, ast.Name) and cls.CACHE_NAME.search(t.id):
+                    names.add(t.id)
+                    spans.append((node.lineno, node.end_lineno))
+        if not names:
+            return spans
+        funcs = [f for f in tree.functions.values()]
+        users = [f for f in funcs if any(isinstance(n, ast.Name) and n.id in names for n in ast.walk(f))]
+        called = set()
+        for f in users:
+            for n in ast.walk(f):
+                if isinstance(n, ast.Call):
+                    fn = n.func
+                    if isinstance(fn, ast.Name):
+                        called.add(fn.id)
+                    elif isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name) and fn.value.id in ("self", "cls"):
+                        called.add(fn.attr)
+        for f in funcs:
+            if f in users or f.name in called:
+                spans.append((PyTree.start(f), f.end_lineno))
+        return spans
+
+    def touches_shared_cache(self, otree: PyTree, ntree: PyTree, removed, added) -> bool:
+        old_spans = self.cache_fill_spans(otree)
+        if any(a <= r <= b for r in removed for a, b in old_spans):
+            return True
+        new_spans = self.cache_fill_spans(ntree)
+        return any(a <= ln <= b for ln, _, _ in added for a, b in new_spans)
 
     CHECK_WORTH_SECONDS = 1.5  # the import check costs about 0.7 s of CPU; skip it unless it could save clearly more
 
@@ -502,6 +565,7 @@ class Analyzer:
     def old_line_mask(self, rel: str, otree: PyTree, line: int) -> int:
         scope = otree.scope_of(line)
         m = self.scope_mask(rel, otree, scope, line, in_old=True)
+        self.cover |= m
         self.note(f"{rel}:{line} removed/changed ({scope.kind}) -> {bin(m).count('1')} tests")
         return m
 
@@ -526,6 +590,7 @@ class Analyzer:
                     cls = ntree.qualname(parent)
                     m = self.class_mask(rel, cls)
                     self.note(f"{rel}:{line} new method in {cls} -> {bin(m).count('1')} tests")
+                    self.body_only = False
                     return m
                 qual = ntree.qualname(parent)
                 old_fn = otree.functions.get(qual)
@@ -533,8 +598,10 @@ class Analyzer:
             if old_fn is None:
                 m = self.module_mask(rel)
                 self.note(f"{rel}:{line} new top-level code -> {bin(m).count('1')} tests")
+                self.body_only = False
                 return m
             m = self.neighbour_mask(rel, otree, old_fn, prev_old, next_old)
+            self.cover |= m
             self.note(f"{rel}:{line} added in {qual} ({scope.kind}) -> {bin(m).count('1')} tests")
             return m
         m = self.scope_mask(rel, ntree, scope, line, in_old=False)

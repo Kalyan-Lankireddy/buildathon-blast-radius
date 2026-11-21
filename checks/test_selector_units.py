@@ -172,3 +172,43 @@ def test_import_check_accepts_a_clean_patch_and_rejects_one_that_crashes_the_imp
     clean, detail = imports_cleanly(str(tmp_path), {path: "TABLE = {1: 'a'}\nOTHER = TABLE - {1}\n"})
     assert clean is False and "TypeError" in detail
     assert imports_cleanly(str(tmp_path), {path: "def broken(:\n"})[0] is False
+
+
+CACHED = '''_CACHE = {}
+
+
+def build(cls):
+    return cls
+
+
+def plain(x):
+    return x
+
+
+class G:
+    def __init__(self):
+        hit = _CACHE.get(type(self))
+        if hit is None:
+            hit = _CACHE[type(self)] = build(type(self))
+'''
+
+
+def test_code_that_fills_a_process_wide_cache_is_found_with_what_it_calls():
+    from br.analyze import Analyzer
+    tree = PyTree(CACHED)
+    spans = Analyzer.cache_fill_spans(tree)
+    inside = lambda line: any(a <= line <= b for a, b in spans)
+    assert inside(1) and inside(5) and inside(14)   # the variable, a function it calls, the function that fills it
+    assert not inside(9)                             # an unrelated function
+
+
+def test_verify_says_no_to_anything_but_a_clean_pass(tmp_path):
+    from br.verify import all_passed
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_a.py").write_text("def test_ok():\n    assert True\n\ndef test_bad():\n    assert False\n")
+    ok, _, _ = all_passed(str(tmp_path), {}, ["tests/test_a.py::test_ok"], 20, 30)
+    assert ok
+    ok, detail, _ = all_passed(str(tmp_path), {}, ["tests/test_a.py::test_bad"], 20, 30)
+    assert not ok
+    ok, _, _ = all_passed(str(tmp_path), {}, ["tests/test_a.py::test_missing"], 20, 30)
+    assert not ok

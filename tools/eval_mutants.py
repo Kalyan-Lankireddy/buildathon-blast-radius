@@ -62,8 +62,17 @@ with tempfile.TemporaryDirectory() as data:
     with open(os.path.join(data, "tests.json"), "w") as f:
         json.dump({"tests": tests}, f)
     env = dict(os.environ, BR_DATA=data, BR_SRC=checkout, BR_MAPS=maps)
-    out = subprocess.run([sys.executable, "-I", os.path.join(here, "..", "selector.py")], env=env,
-                         capture_output=True, text=True).stdout
+    if os.environ.get("BR_IMAGE"):  # run the submission image under the scorer's limits instead of the local files
+        cmd = ["docker", "run", "--rm", "--platform", "linux/amd64", "--network", "none", "--cpus", "2", "--memory", "4096m",
+               "--memory-swap", "4096m", "--pids-limit", "256", "--read-only", "--tmpfs", "/tmp:rw,size=64m,mode=1777",
+               "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "65534:65534", "--env", "HOME=/tmp",
+               "-e", "BR_EXPLAIN=1", "-v", f"{data}:/data:ro", os.environ["BR_IMAGE"]]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        open("/tmp/eval_image.err", "w").write(proc.stderr)
+        out = proc.stdout
+    else:
+        out = subprocess.run([sys.executable, "-I", os.path.join(here, "..", "selector.py")], env=env,
+                             capture_output=True, text=True).stdout
 chosen = {json.loads(l)["commit"]: json.loads(l)["workers"] for l in out.splitlines()}
 
 

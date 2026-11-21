@@ -25,6 +25,19 @@ The patch is read line by line, and each changed line is classified from the AST
 The selected tests are packed onto 1 to 8 workers, choosing the count that minimizes
 `busiest worker + 2 s * workers`.
 
+## The local check (v1.12)
+
+For a commit whose edits are all inside function bodies of package files, where a test of 20 s or more is selected and
+cheap tests (under 0.5 s) cover the changed lines, the selector runs those cheap tests on the patched code in one pytest
+process (br/verify.py, with br/verify_plugin.py serving the patched sources over the read-only disk). If every one
+passes, the heavy tests (3 s or more) and the verified cheap tests leave the CI selection. Any failure, error, skip,
+timeout, CPU kill (10 s), crash or exhausted budget (half the time limit) keeps the normal selection. It only starts
+when it could save at least 8 s of CI time, and it stops trying when wasted runs outnumber twice the passes by 5. The
+image installs requirements.lock so sqlglot's tests can run. Set BR_VERIFY=0 to turn it off.
+
+Edits to code that fills a process-wide cache (generator.py's dispatch table) now widen to the module's users, because
+the coverage map credits only the first test that filled the cache (found by the heavy-test mutants h085 and h086).
+
 ## Where the maps come from
 
 `maps/maps.json.gz` holds facts about sqlglot at the pinned commit, produced by `tools/build_all.sh`:

@@ -112,3 +112,15 @@ Ground truth for the first batch was recomputed after the failure-summary parser
   time say nothing about an edit. Names narrowable only through derivation are now excluded from entry narrowing.
 - The new-method rule (a new method in a class body selects the class's users) was first validated with xdist and four
   dropped crashed-worker entries. A clean serial rerun of those two mutants is queued behind the campaign.
+
+## v1.12: the local check, and a miss it uncovered
+- Campaign (140 mutants aimed at heavy tests, ground truth with heavy tests run serially): 0 hidden heavy failures in
+  86 real ones, 0 tests that passed locally but failed in ground truth. The gated policy priced at a net +14 to +23 s
+  on mostly destructive mutants, and pays on commits that break nothing.
+- Sample through the amd64 image under the scorer's limits: 128.78 s simulated plus 18.7 s CPU (v1.11: 170.72 + 1.94),
+  0 misses, stable over 3 runs. Two commits (2haz, 66ks) drop their heavy test; two attempts fail and fall back.
+- All 140 heavy mutants through the image with no cap on attempts: 133 attempts, 21 passed and dropped heavy tests,
+  none of those 21 had a heavy test really fail, 0 misses against the known truth.
+- Lesson: h085 and h086 (edits in generator.py's _build_dispatch) were real misses of v1.11, unrelated to the check.
+  A process-wide cache credits coverage to the first test that filled it. Fixed with the cache rule.
+- s014 and s015 (new method) on clean serial ground truth: s014 fails 7 distinct tests, all in the selection; s015 fails none.
