@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import resource
 import sys
 import time
 from pathlib import Path
@@ -74,7 +75,10 @@ def main() -> None:
             print(f"== {patch.stem}", file=sys.stderr)
             for line in analyzer.reasons:
                 print(f"   {line}", file=sys.stderr)
-    print(f"selected for {full_selected} commits: the full suite; cpu {time.process_time():.2f} s", file=sys.stderr)
+    children = resource.getrusage(resource.RUSAGE_CHILDREN)  # the import check runs in a subprocess; the board counts it
+    cpu = time.process_time() + children.ru_utime + children.ru_stime
+    print(f"selected for {full_selected} commits: the full suite; cpu {cpu:.2f} s "
+          f"({children.ru_utime + children.ru_stime:.2f} s in subprocesses)", file=sys.stderr)
 
 
 if __name__ == "__main__":
