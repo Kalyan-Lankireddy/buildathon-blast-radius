@@ -25,3 +25,15 @@ Track: RWX Blast Radius. Score is simulated CI seconds plus CPU seconds, lower i
   fixture edits, two misses). Setup-phase lines, files and classes are now shared with the whole class.
 - Reading pytest's failure summary needs care: a subtest title can contain multi-line SQL, which splits one
   `SUBFAILED[...]` entry across lines. The first ground truth under-counted failures because of it.
+
+## Mutation harness (our own patches, real test outcomes)
+Patches we generate against the pinned commit, run through the real suite for ground truth, then compare with
+the selector's choice. They are for evaluation only.
+
+| Run | Mutants | Misses | Note |
+| --- | --- | --- | --- |
+| v1.4 maps, fixture edits | 6 | 2 | class-level setup was credited to too few tests (fixed in v1.5) |
+| v1.5 maps, fixture and test-file edits | 12 | 0 | |
+| v1.5 maps, source edits (operator and constant swaps, half class level) | 7 so far | 0 | 36 planned, still running |
+
+Ground truth for the first batch was recomputed after the failure-summary parser was fixed.
