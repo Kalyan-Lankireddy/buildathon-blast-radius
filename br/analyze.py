@@ -35,6 +35,9 @@ CONFIG_NAMES = {"pyproject.toml", "setup.py", "setup.cfg", "pytest.ini", "tox.in
                 "requirements.txt", "requirements.lock"}
 
 
+MAX_CHANGED_LINES = 60  # changed code lines in one file before we stop analysing and run everything
+
+
 class FullSuite(Exception):
     """Raised when the only safe answer is every test."""
 
@@ -230,6 +233,9 @@ class Analyzer:
             self.note(f"{rel}: comments or blank lines only, tests that read the file: {bin(m).count('1')}")
             return m
 
+        if len(removed) + len(added) > MAX_CHANGED_LINES:
+            # A refactor this large will break a lot, and looking up every line costs CPU seconds.
+            raise FullSuite(f"{rel}: {len(removed) + len(added)} changed lines")
         mask = 0
         for r in removed:
             mask |= self.old_line_mask(rel, otree, r)
@@ -248,7 +254,8 @@ class Analyzer:
         insertions (more added than removed lines, or a different kind of place) need the
         neighbour rule, which is wider.
         """
-        removed = set(edit.removed)
+        # only real code can stand in for the line that replaces it: a removed comment selects nothing
+        removed = {r for r in edit.removed if not otree.is_comment_or_blank(r)}
         by_slot: dict[int, list[int]] = {}
         for a, prev_old, _ in added:
             by_slot.setdefault(prev_old, []).append(a)

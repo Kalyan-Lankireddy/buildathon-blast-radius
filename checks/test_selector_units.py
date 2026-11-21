@@ -63,3 +63,16 @@ def test_scopes_distinguish_function_class_and_module_lines():
     assert tree.scope_of(4).kind == "classbody" and tree.scope_of(4).cls == "C"
     assert tree.scope_of(7).kind == "runtime"
     assert tree.scope_of(6).kind == "funcheader"
+
+
+def test_uncommenting_code_is_not_treated_as_a_replacement():
+    from br.analyze import Analyzer
+
+    old = PyTree("def f():\n    # x = g()\n    return 1\n")
+    new = PyTree("def f():\n    x = g()\n    return 1\n")
+    (fp,) = parse_patch(
+        "diff --git a/sqlglot/x.py b/sqlglot/x.py\n--- a/sqlglot/x.py\n+++ b/sqlglot/x.py\n"
+        "@@ -1,3 +1,3 @@\n def f():\n-    # x = g()\n+    x = g()\n     return 1\n")
+    _, edit = apply_hunks("def f():\n    # x = g()\n    return 1\n", fp.hunks)
+    added = [(a, p, n) for a, p, n in edit.added]
+    assert Analyzer.replacement_slots(old, new, edit, added) == set()
