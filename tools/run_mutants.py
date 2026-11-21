@@ -35,21 +35,38 @@ def run(name):
     )
     text = proc.stdout
     failing = set()
+    entries, current, in_summary = [], None, False
     for line in text.splitlines():
-        m = re.match(r"^(FAILED|ERROR|SUBFAILED)\b[^\n]*?(tests/[^\s:]+\.py)(::\S+)?", line)
-        if not m:
+        if "short test summary info" in line:
+            in_summary = True
             continue
-        failing.add((m.group(2) + (m.group(3) or "")) if m.group(3) else m.group(2))
+        if not in_summary:
+            continue
+        if re.match(r"^(FAILED|ERROR|SUBFAILED)\b", line):
+            current = [line]
+            entries.append(current)
+        elif current is not None and not re.match(r"^=+ .* =+$|^\d+ (failed|passed|error)", line):
+            current.append(line)  # a subtest title can span several lines
+    for entry in entries:
+        joined = " ".join(entry)
+        if joined.startswith("SUBFAILED"):
+            m = re.search(r"\]\s+(tests/\S+)", joined)
+        else:
+            m = re.match(r"^(?:FAILED|ERROR)\s+(tests/\S+)", joined)
+        if m:
+            failing.add(m.group(1))
     ids = [l.strip() for l in open("/ids.txt") if "::" in l]
     result = set()
     for f in failing:
         if "::" in f:
-            base = re.sub(r"\[.*$", "", f)
+            base = re.sub(r"\[.*$", "", f).rstrip(":")
             result.update(i for i in ids if i == base or i.startswith(base + "::") or i == f)
         else:  # a whole file failed to import
             result.update(i for i in ids if i.startswith(f + "::"))
     summary = text.strip().splitlines()[-1] if text.strip() else ""
-    json.dump({"failing": sorted(result), "summary": summary, "returncode": proc.returncode}, open(out, "w"))
+    failed_lines = [" ".join(e)[:300] for e in entries]
+    json.dump({"failing": sorted(result), "summary": summary, "returncode": proc.returncode,
+               "failed_lines": failed_lines[:40]}, open(out, "w"))
     print(name, len(result), summary, flush=True)
 
 

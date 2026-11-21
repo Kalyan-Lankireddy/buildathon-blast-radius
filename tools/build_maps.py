@@ -28,6 +28,16 @@ def test_id(context):
     return context.split("|", 1)[0]
 
 
+def phase(context):
+    return context.split("|", 1)[1] if "|" in context else ""
+
+
+def class_of(name):
+    """'tests/x.py::T::t' -> 'tests/x.py::T'; a plain function test has no class and shares nothing."""
+    parts = name.split("::")
+    return "::".join(parts[:-1]) if len(parts) >= 3 else None
+
+
 def module_of(rel):
     name = rel[:-3] if rel.endswith(".py") else rel
     parts = name.split("/")
@@ -200,6 +210,16 @@ def class_owners():
 def main():
     ids = [l.strip() for l in open(os.path.join(OUT, "collected.txt")) if "::" in l]
     index = {name: i for i, name in enumerate(ids)}
+    siblings = {}
+    for name, i in index.items():
+        cls = class_of(name)
+        if cls:
+            siblings.setdefault(cls, []).append(i)
+
+    def sharers(name):
+        """The tests that depend on what `name`'s setup did: its whole class, or just itself."""
+        cls = class_of(name)
+        return siblings[cls] if cls else [index[name]]
 
     sets, set_ids = [], {}
 
@@ -228,7 +248,10 @@ def main():
                 if name == "":
                     at_import = True
                 elif name in index:
-                    members.add(index[name])
+                    if phase(ctx) in ("setup", "teardown"):
+                        members.update(sharers(name))  # class-level setup serves every test in the class
+                    else:
+                        members.add(index[name])
                 else:
                     unknown_contexts.add(name)
             if at_import:
@@ -259,6 +282,13 @@ def main():
                 opens.setdefault(o, set()).add(t)
             for d in rec["listdirs"]:
                 listdirs.setdefault(d, set()).add(t)
+            shared = sharers(rec["id"])
+            for c in rec.get("setup_classes", []):
+                classes.setdefault(c, set()).update(shared)
+            for o in rec.get("setup_opens", []):
+                opens.setdefault(o, set()).update(shared)
+            for d in rec.get("setup_listdirs", []):
+                listdirs.setdefault(d, set()).update(shared)
 
     importers_top, importers_local = import_graph()
     attribute_tests = attribute_reads(files, intern, sets)

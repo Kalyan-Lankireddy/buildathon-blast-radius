@@ -197,11 +197,21 @@ def pytest_collection_finish(session):
 
 
 @pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_setup(item):
+    """What the setup phase did. Class-level setup (setUpClass, class fixtures) runs once, inside the
+    first test of the class, but every test in the class depends on it; the map builder shares it out."""
+    yield
+    _state["setup"] = {"classes": set(_state["classes"]), "opens": set(_state["opens"]),
+                       "listdirs": set(_state["listdirs"])}
+
+
+@pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_protocol(item, nextitem):
     _state["classes"] = set()
     _state["opens"] = set()
     _state["listdirs"] = set()
     _state["spawns"] = False
+    _state["setup"] = {"classes": set(), "opens": set(), "listdirs": set()}
     _state["active"] = True
     try:
         yield
@@ -213,6 +223,9 @@ def pytest_runtest_protocol(item, nextitem):
             "opens": sorted(_state["opens"]),
             "listdirs": sorted(_state["listdirs"]),
             "spawns": _state["spawns"],
+            "setup_classes": _class_names(_state["setup"]["classes"]),
+            "setup_opens": sorted(_state["setup"]["opens"]),
+            "setup_listdirs": sorted(_state["setup"]["listdirs"]),
         }
         os.makedirs(OUT, exist_ok=True)
         with open(os.path.join(OUT, f"meta-{WORKER}.jsonl"), "a", encoding="utf-8") as f:
