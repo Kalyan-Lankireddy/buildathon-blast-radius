@@ -60,6 +60,7 @@ class Maps:
         self._classes = raw["classes"]
         self._opens = raw["opens"]
         self._listdirs = raw["listdirs"]
+        self._attr_tests: dict[str, int] = raw.get("attr_tests", {})
         self.class_owners: dict[str, list[str]] = raw.get("class_owners", {})
         self.importers: dict[str, list[str]] = raw.get("importers", {})
         self.local_importers: dict[str, list[list]] = raw.get("local_importers", {})
@@ -106,6 +107,11 @@ class Maps:
 
     def class_mask(self, full: str) -> int:
         return self.mask(self._classes.get(full))
+
+    def attr_mask(self, name: str) -> int | None:
+        """Tests that ran a line reading class constant `name`; None when the name cannot be narrowed."""
+        set_id = self._attr_tests.get(name)
+        return None if set_id is None else self.mask(set_id)
 
     def opens_mask(self, rel: str) -> int:
         return self.mask(self._opens.get(rel))
@@ -292,6 +298,9 @@ class Analyzer:
                 return maps.lines_mask(rel, range(PyTree.start(stmt), stmt.end_lineno + 1))
             m = self.class_mask(rel, scope.cls)
             if stmt is not None:
+                narrowed = self.attribute_readers(tree, stmt)
+                if narrowed is not None:
+                    m &= narrowed  # a test must use the class AND read the constant
                 m |= maps.lines_mask(rel, range(PyTree.start(stmt), stmt.end_lineno + 1))
             return m
         # module level
@@ -300,6 +309,31 @@ class Analyzer:
         if stmt is not None and tree.lambda_body_line(stmt, line):
             return maps.lines_mask(rel, range(PyTree.start(stmt), stmt.end_lineno + 1))
         return self.module_mask(rel)
+
+    def attribute_readers(self, tree: PyTree, stmt) -> int | None:
+        """For `NAME = ...` directly in a class body: the tests that ran a line reading NAME.
+
+        Only when every name assigned has a map entry, which exists only when all of its reads happen at
+        test time (see tools/build_maps.py). Anything else returns None and the caller keeps the wider
+        rule of all users of the class.
+        """
+        if isinstance(stmt, ast.Assign):
+            targets = stmt.targets
+        elif isinstance(stmt, (ast.AnnAssign, ast.AugAssign)):
+            targets = [stmt.target]
+        else:
+            return None
+        if not isinstance(tree.parent.get(id(stmt)), ast.ClassDef):
+            return None
+        mask = 0
+        for target in targets:
+            if not isinstance(target, ast.Name):
+                return None
+            readers = self.maps.attr_mask(target.id)
+            if readers is None:
+                return None
+            mask |= readers
+        return mask
 
     @staticmethod
     def type_checking_only(tree: PyTree, stmt) -> bool:

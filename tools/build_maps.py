@@ -13,6 +13,7 @@ import glob
 import gzip
 import json
 import os
+import re
 import sys
 
 import coverage
@@ -89,6 +90,75 @@ def import_graph():
         {k: sorted(v) for k, v in sorted(top.items())},
         {k: [list(t) for t in sorted(v)] for k, v in sorted(local.items())},
     )
+
+
+CONSTANT = re.compile(r"^[A-Z][A-Z0-9_]*$")
+IMPORT_TIME_FUNCTIONS = {"__new__", "__init_subclass__", "__set_name__", "__class_getitem__"}
+
+
+def attribute_reads(files, intern, sets):
+    """For each ALL_CAPS name, the tests that ran a line that reads it, if every read happens at test time.
+
+    A class constant such as WEEK_OFFSET only matters to a test that reads it. A read counts when it is
+    `x.NAME` or the string "NAME" (getattr, __dict__) inside a function body. If any read happens at import
+    time (class body, module level, a metaclass __new__), the value may be folded into other attributes
+    before any test runs, so the name is left out and callers fall back to the class's users.
+    """
+    reads = {}
+    for top_dir in ("sqlglot", "tests"):
+        for dirpath, _, names in os.walk(os.path.join(ROOT, top_dir)):
+            for name in names:
+                if not name.endswith(".py"):
+                    continue
+                rel = os.path.relpath(os.path.join(dirpath, name), ROOT)
+                with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
+                    tree = ast.parse(f.read())
+                parent = {}
+                for node in ast.walk(tree):
+                    for child in ast.iter_child_nodes(node):
+                        parent[child] = node
+
+                def climb(node):
+                    func = stmt = None
+                    cur = node
+                    while cur is not None:
+                        if stmt is None and isinstance(cur, ast.stmt):
+                            stmt = cur
+                        if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                            func = func or cur
+                        cur = parent.get(cur)
+                    return func, stmt
+
+                for node in ast.walk(tree):
+                    found = None
+                    if isinstance(node, ast.Attribute) and CONSTANT.match(node.attr) and isinstance(node.ctx, ast.Load):
+                        found = node.attr
+                    elif isinstance(node, ast.Constant) and isinstance(node.value, str) and CONSTANT.match(node.value):
+                        found = node.value
+                    elif isinstance(node, ast.Name) and CONSTANT.match(node.id) and isinstance(node.ctx, ast.Load):
+                        found = node.id  # only a class attribute when read inside a class body (import time)
+                    if found is None:
+                        continue
+                    func, stmt = climb(node)
+                    entry = reads.setdefault(found, {"unsafe": False, "lines": set()})
+                    if isinstance(node, ast.Name) and func is not None:
+                        continue  # a bare global inside a function is not a class attribute
+                    if func is None or getattr(func, "name", "") in IMPORT_TIME_FUNCTIONS:
+                        entry["unsafe"] = True
+                        continue
+                    first = min([stmt.lineno] + [d.lineno for d in getattr(stmt, "decorator_list", [])])
+                    entry["lines"].update((rel, ln) for ln in range(first, stmt.end_lineno + 1))
+    out = {}
+    for name, entry in reads.items():
+        if entry["unsafe"] or not entry["lines"]:
+            continue
+        members = set()
+        for rel, ln in entry["lines"]:
+            sid = files.get(rel, {}).get("lines", {}).get(str(ln))
+            if sid is not None:
+                members.update(sets[sid])
+        out[name] = intern(members)
+    return out
 
 
 def class_owners():
@@ -173,6 +243,7 @@ def main():
                 listdirs.setdefault(d, set()).add(t)
 
     importers_top, importers_local = import_graph()
+    attribute_tests = attribute_reads(files, intern, sets)
     maps = {
         "tests": ids,
         "sets": sets,
@@ -181,6 +252,7 @@ def main():
         "opens": {k: intern(v) for k, v in sorted(opens.items())},
         "listdirs": {k: intern(v) for k, v in sorted(listdirs.items())},
         "class_owners": class_owners(),
+        "attr_tests": attribute_tests,
         "importers": importers_top,
         "local_importers": importers_local,
     }
