@@ -64,6 +64,10 @@ class Maps:
         self._opens = raw["opens"]
         self._listdirs = raw["listdirs"]
         self._attr_tests: dict[str, int] = raw.get("attr_tests", {})
+        self._dict_keys: dict[str, int] = raw.get("dict_keys", {})
+        self._dict_iter: dict[str, int] = raw.get("dict_iter", {})
+        self._wrapped = set(raw.get("wrapped_dicts", []))
+        self._descendants: dict[str, list[str]] = raw.get("descendants", {})
         self._spawners = self.mask(raw.get("spawn_tests"))  # tests that start a subprocess
         self._core = set(raw.get("core_modules", []))  # files that a bare `import sqlglot` loads
         self.class_owners: dict[str, list[str]] = raw.get("class_owners", {})
@@ -120,6 +124,20 @@ class Maps:
 
     def class_mask(self, full: str) -> int:
         return self.mask(self._classes.get(full))
+
+    def dict_entry_mask(self, cls_full: str, name: str, key: str) -> int | None:
+        """Tests that looked up `key` in dict `name` of the class or a subclass, or walked that dict.
+
+        None when no such dict was recorded, so the caller keeps the wider rule.
+        """
+        mask, recorded = 0, False
+        for owner in self._descendants.get(cls_full, [cls_full]):
+            if f"{owner}|{name}" not in self._wrapped:
+                continue
+            recorded = True
+            mask |= self.mask(self._dict_keys.get(f"{owner}|{name}|{key}"))
+            mask |= self.mask(self._dict_iter.get(f"{owner}|{name}"))
+        return mask if recorded else None
 
     def attr_mask(self, name: str) -> int | None:
         """Tests that ran a line reading class constant `name`; None when the name cannot be narrowed."""
@@ -249,7 +267,7 @@ class Analyzer:
             # `import sqlglot` loads that fails every test; elsewhere it fails the tests that import it.
             if maps.is_core(rel):
                 raise FullSuite(f"{rel}: import-time statement that is not a plain literal, in a core module")
-            mask |= self.module_mask(rel) | maps.spawners_for(rel)
+            mask |= self.module_mask(rel, depth_limit=None) | maps.spawners_for(rel)
             self.note(f"{rel}: import-time statement that is not a plain literal -> module users")
         for a, prev_old, next_old in added:
             if a in replaced:
@@ -360,10 +378,9 @@ class Analyzer:
                 if parent is None:
                     break
                 if isinstance(parent, ast.ClassDef):
-                    cls = ntree.qualname(parent)
-                    m = self.class_mask(rel, cls)
-                    self.note(f"{rel}:{line} new method in {cls} -> {bin(m).count('1')} tests")
-                    return m
+                    # A new method can override one the class inherits, for callers we may not have recorded
+                    # (a mutant that added `limit_sql` to a generator failed tests outside its recorded users).
+                    raise FullSuite(f"{rel}:{line} new method in class {ntree.qualname(parent)}")
                 qual = ntree.qualname(parent)
                 old_fn = otree.functions.get(qual)
                 scope.func = parent
@@ -433,7 +450,9 @@ class Analyzer:
             if stmt is not None:
                 narrowed = self.attribute_readers(tree, stmt)
                 if narrowed is not None:
-                    m &= narrowed  # a test must use the class AND read the constant
+                    entry = self.dict_entry_readers(rel, tree, stmt, line, scope.cls)
+                    # a test must use the class AND read the constant (and, for one dict entry, look it up)
+                    m &= narrowed if entry is None else entry
                 m |= maps.lines_mask(rel, range(PyTree.start(stmt), stmt.end_lineno + 1))
             return m | maps.spawners_for(rel)
         # module level
@@ -468,6 +487,29 @@ class Analyzer:
             mask |= readers
         return mask
 
+    def dict_entry_readers(self, rel: str, tree: PyTree, stmt, line: int, qual: str) -> int | None:
+        """For an edit inside one entry of `NAME = {key: value, ...}`: the tests that looked that key up."""
+        if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
+                and isinstance(stmt.value, ast.Dict)):
+            return None
+        for key, value in zip(stmt.value.keys, stmt.value.values):
+            first = key.lineno if key is not None else value.lineno
+            if first <= line <= value.end_lineno:
+                break
+        else:
+            return None  # a brace line, not an entry
+        if key is None:
+            return None  # `**Base.NAME`: every entry of the base
+        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+            name = "S:" + key.value
+        elif isinstance(key, ast.Attribute):
+            name = key.attr
+        elif isinstance(key, ast.Name):
+            name = key.id
+        else:
+            return None
+        return self.maps.dict_entry_mask(f"{module_of(rel)}:{qual}", stmt.targets[0].id, name)
+
     @staticmethod
     def type_checking_only(tree: PyTree, stmt) -> bool:
         if stmt is None:
@@ -493,8 +535,12 @@ class Analyzer:
                 mask |= maps.class_mask(owner)
         return mask
 
-    def module_mask(self, rel: str) -> int:
-        """Tests that ran code in the module, built its classes, or did so for its near importers."""
+    def module_mask(self, rel: str, depth_limit: int | None = 2) -> int:
+        """Tests that ran code in the module, built its classes, or did so for its importers.
+
+        `depth_limit` is how many import hops to follow; None follows the whole chain, which is what an
+        import-time crash needs: everything that imports the module, directly or not, fails with it.
+        """
         maps = self.maps
         seen = {rel}
         queue = deque([(rel, 0)])
@@ -509,7 +555,7 @@ class Analyzer:
             # a function that imports the module inside its body only matters to the tests that ran it
             for path, first, last in maps.local_importers.get(cur, []):
                 mask |= maps.lines_mask(path, range(first, last + 1))
-            if depth >= 2:
+            if depth_limit is not None and depth >= depth_limit:
                 continue
             for importer in maps.importers.get(cur, []):
                 if importer not in seen and not importer.endswith("__init__.py"):

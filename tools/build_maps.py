@@ -173,6 +173,50 @@ def attribute_reads(files, intern, sets):
     return out
 
 
+def wrapped_dicts():
+    """The ALL_CAPS plain-dict class attributes that br_plugin wraps, as "module:Class|NAME"."""
+    sys.path.insert(0, ROOT)
+    from sqlglot import generator, parser, tokens
+    from sqlglot.dialects.dialect import Dialect
+
+    seen, out = set(), []
+    for base in (tokens.Tokenizer, parser.Parser, generator.Generator, Dialect):
+        stack = [base]
+        while stack:
+            cls = stack.pop()
+            if cls in seen:
+                continue
+            seen.add(cls)
+            stack.extend(cls.__subclasses__())
+            for name, value in vars(cls).items():
+                if type(value) is dict and re.match(r"^[A-Z][A-Z0-9_]*$", name):
+                    out.append(f"{cls.__module__}:{cls.__qualname__}|{name}")
+    return sorted(out)
+
+
+def descendants():
+    """class -> itself and every subclass, for the Tokenizer / Parser / Generator / Dialect families."""
+    sys.path.insert(0, ROOT)
+    from sqlglot import generator, parser, tokens
+    from sqlglot.dialects.dialect import Dialect
+
+    out = {}
+
+    def walk(cls, acc):
+        acc.append(cls)
+        for sub in cls.__subclasses__():
+            walk(sub, acc)
+
+    for base in (tokens.Tokenizer, parser.Parser, generator.Generator, Dialect):
+        everyone = []
+        walk(base, everyone)
+        for cls in everyone:
+            subs = []
+            walk(cls, subs)
+            out[f"{cls.__module__}:{cls.__qualname__}"] = sorted({f"{k.__module__}:{k.__qualname__}" for k in subs})
+    return out
+
+
 def core_modules():
     """Files of the modules a bare `import sqlglot` loads. A subprocess test can only be hurt by these."""
     import subprocess
@@ -268,6 +312,7 @@ def main():
         }
 
     classes, opens, listdirs, spawners = {}, {}, {}, set()
+    dict_keys, dict_iter = {}, {}
     seen_tests = set()
     for meta in glob.glob(os.path.join(OUT, "meta-*.jsonl")):
         for line in open(meta, encoding="utf-8"):
@@ -285,6 +330,16 @@ def main():
             for d in rec["listdirs"]:
                 listdirs.setdefault(d, set()).add(t)
             shared = sharers(rec["id"])
+            for o, a, keys in rec.get("dict_keys", []):
+                for k in keys:
+                    dict_keys.setdefault(f"{o}|{a}|{k}", set()).add(t)
+            for o, a in rec.get("dict_iter", []):
+                dict_iter.setdefault(f"{o}|{a}", set()).add(t)
+            for o, a, keys in rec.get("setup_dict_keys", []):
+                for k in keys:
+                    dict_keys.setdefault(f"{o}|{a}|{k}", set()).update(shared)
+            for o, a in rec.get("setup_dict_iter", []):
+                dict_iter.setdefault(f"{o}|{a}", set()).update(shared)
             for c in rec.get("setup_classes", []):
                 classes.setdefault(c, set()).update(shared)
             for o in rec.get("setup_opens", []):
@@ -303,6 +358,10 @@ def main():
         "listdirs": {k: intern(v) for k, v in sorted(listdirs.items())},
         "class_owners": class_owners(),
         "attr_tests": attribute_tests,
+        "dict_keys": {k: intern(v) for k, v in sorted(dict_keys.items())},
+        "dict_iter": {k: intern(v) for k, v in sorted(dict_iter.items())},
+        "descendants": descendants(),
+        "wrapped_dicts": wrapped_dicts(),
         "spawn_tests": intern(spawners),
         "core_modules": core_modules(),
         "importers": importers_top,

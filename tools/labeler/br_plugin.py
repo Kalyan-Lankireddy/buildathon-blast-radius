@@ -21,7 +21,7 @@ ROOT = os.environ.get("BR_ROOT", "/src/sqlglot") + os.sep
 OUT = os.environ.get("BR_OUT", "/out")
 WORKER = os.environ.get("PYTEST_XDIST_WORKER", "main")
 
-_state = {"active": False, "classes": set(), "opens": set(), "listdirs": set(), "spawns": False}
+_state = {"dict_keys": {}, "dict_iter": {}, "active": False, "classes": set(), "opens": set(), "listdirs": set(), "spawns": False}
 SPAWN_EVENTS = {"subprocess.Popen", "os.system", "os.fork", "os.posix_spawn", "os.exec", "os.spawn"}
 
 
@@ -81,6 +81,118 @@ def _all_subclasses(cls, seen=None):
             seen.add(sub)
             _all_subclasses(sub, seen)
     return seen
+
+
+def _norm_key(key):
+    """A lookup key in the form the AST of a dict literal gives: a class or enum member by its last name."""
+    import enum
+
+    if isinstance(key, str):
+        return "S:" + key
+    if isinstance(key, type):
+        return key.__name__
+    if isinstance(key, enum.Enum):
+        return key.name
+    return None  # a key we cannot name; callers treat it as "any key"
+
+
+class _RecordingDict(dict):
+    """A class-level dict that notes which keys tests look up, and when a test walks the whole thing."""
+
+    __slots__ = ("owner", "attr")
+
+    def _note_key(self, key):
+        if _state["active"]:
+            norm = _norm_key(key)
+            if norm is None:
+                _state["dict_iter"].setdefault((self.owner, self.attr), True)
+            else:
+                _state["dict_keys"].setdefault((self.owner, self.attr), set()).add(norm)
+
+    def _note_walk(self):
+        if _state["active"]:
+            _state["dict_iter"][(self.owner, self.attr)] = True
+
+    def __getitem__(self, key):
+        self._note_key(key)
+        return dict.__getitem__(self, key)
+
+    def get(self, key, default=None):
+        self._note_key(key)
+        return dict.get(self, key, default)
+
+    def __contains__(self, key):
+        self._note_key(key)
+        return dict.__contains__(self, key)
+
+    def pop(self, key, *default):
+        self._note_key(key)
+        return dict.pop(self, key, *default)
+
+    def setdefault(self, key, default=None):
+        self._note_key(key)
+        return dict.setdefault(self, key, default)
+
+    def __iter__(self):
+        self._note_walk()
+        return dict.__iter__(self)
+
+    def keys(self):
+        self._note_walk()
+        return dict.keys(self)
+
+    def values(self):
+        self._note_walk()
+        return dict.values(self)
+
+    def items(self):
+        self._note_walk()
+        return dict.items(self)
+
+    def __len__(self):
+        self._note_walk()
+        return dict.__len__(self)
+
+    def copy(self):
+        self._note_walk()
+        return dict(dict.items(self))
+
+    def update(self, *args, **kwargs):
+        self._note_walk()
+        return dict.update(self, *args, **kwargs)
+
+    def __or__(self, other):
+        self._note_walk()
+        return dict(dict.items(self)) | other
+
+    def __ror__(self, other):
+        self._note_walk()
+        return other | dict(dict.items(self))
+
+    def __reduce__(self):
+        return (dict, (dict(dict.items(self)),))
+
+
+def _wrap_class_dicts():
+    """Replace every ALL_CAPS plain-dict class attribute of a Tokenizer, Parser, Generator or Dialect."""
+    import re
+
+    from sqlglot import generator, parser, tokens
+    from sqlglot.dialects.dialect import Dialect
+
+    caps = re.compile(r"^[A-Z][A-Z0-9_]*$")
+    seen = set()
+    for base in (tokens.Tokenizer, parser.Parser, generator.Generator, Dialect):
+        for cls in [base, *_all_subclasses(base)]:
+            if cls in seen:
+                continue
+            seen.add(cls)
+            for name, value in list(vars(cls).items()):
+                if type(value) is dict and caps.match(name):
+                    rec = _RecordingDict(value)
+                    rec.owner = f"{cls.__module__}:{cls.__qualname__}"
+                    rec.attr = name
+                    setattr(cls, name, rec)
 
 
 def _install():
@@ -192,6 +304,7 @@ def pytest_collection_finish(session):
     _import_every_module()
     patched = _inline_process_pools()
     _install()
+    _wrap_class_dicts()
     sys.addaudithook(_audit)
     print(f"br_plugin: process pools run in process in {patched}", file=sys.stderr)
 
@@ -202,7 +315,9 @@ def pytest_runtest_setup(item):
     first test of the class, but every test in the class depends on it; the map builder shares it out."""
     yield
     _state["setup"] = {"classes": set(_state["classes"]), "opens": set(_state["opens"]),
-                       "listdirs": set(_state["listdirs"])}
+                       "listdirs": set(_state["listdirs"]),
+                       "dict_keys": {k: set(v) for k, v in _state["dict_keys"].items()},
+                       "dict_iter": dict(_state["dict_iter"])}
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -211,7 +326,9 @@ def pytest_runtest_protocol(item, nextitem):
     _state["opens"] = set()
     _state["listdirs"] = set()
     _state["spawns"] = False
-    _state["setup"] = {"classes": set(), "opens": set(), "listdirs": set()}
+    _state["setup"] = {"classes": set(), "opens": set(), "listdirs": set(), "dict_keys": {}, "dict_iter": {}}
+    _state["dict_keys"] = {}
+    _state["dict_iter"] = {}
     _state["active"] = True
     try:
         yield
@@ -223,6 +340,10 @@ def pytest_runtest_protocol(item, nextitem):
             "opens": sorted(_state["opens"]),
             "listdirs": sorted(_state["listdirs"]),
             "spawns": _state["spawns"],
+            "dict_keys": [[o, a, sorted(k)] for (o, a), k in sorted(_state["dict_keys"].items())],
+            "dict_iter": [[o, a] for (o, a) in sorted(_state["dict_iter"])],
+            "setup_dict_keys": [[o, a, sorted(k)] for (o, a), k in sorted(_state["setup"]["dict_keys"].items())],
+            "setup_dict_iter": [[o, a] for (o, a) in sorted(_state["setup"]["dict_iter"])],
             "setup_classes": _class_names(_state["setup"]["classes"]),
             "setup_opens": sorted(_state["setup"]["opens"]),
             "setup_listdirs": sorted(_state["setup"]["listdirs"]),

@@ -10,6 +10,7 @@ Track: RWX Blast Radius. Score is simulated CI seconds plus CPU seconds, lower i
 | v1.2 | all modules imported eagerly while labeling; import-time lines widen; replaced lines use the removed line's own tests | 170.717 s | 0 | see below | mutants: 0 misses so far |
 | v1.5 | class-level setup (setUpClass, class fixtures) shared with every test in the class | 170.717 s | 0 | see below | mutant harness found 2 misses on fixture edits before this fix |
 | v1.6 | import-time statements that could crash an import widen; new package files run everything; docstrings count like comments | 170.717 s | 0 | see below | practice v1.5: 207.5 s |
+| v1.7 | import-time crashes follow the whole importer chain; a new method in a class body runs everything | 170.717 s | 0 | see below | harness: 53 mutants, 0 misses |
 
 ## Lessons
 - Per-test coverage is blind to work done in child processes. `test_optimizer` and `test_executor` hand their
@@ -49,3 +50,10 @@ Ground truth for the first batch was recomputed after the failure-summary parser
 - The harness's own parser matters. Pytest prints keyword-style subtests as `SUBFAILED(k=v, ...)`, not `SUBFAILED[...]`,
   and long titles were cut at 300 characters. `tools/eval_mutants.py` now re-reads stored failure lines and flags any it
   cannot read, so an under-counted ground truth cannot pass as a clean result.
+- Two more misses came from the structural mutants, both now closed. A string edited inside `exp.maybe_parse("""...""")`
+  in a class body runs at import and breaks the DuckDB generator module; 1,112 tests failed because the failure follows
+  the whole chain of importers, not two hops. And a new method added to a generator class failed tests that the
+  recorded class users did not include, so a new method in a class body now runs the full suite.
+- Dict-key narrowing (an edit to one entry of `TRANSFORMS`, `FUNCTIONS` or `KEYWORDS` selects only tests that looked
+  that key up) is written in `tools/labeler/br_plugin.py`, `tools/build_maps.py` and `br/analyze.py`, but the committed
+  maps contain no dict data, so it does nothing yet. It needs a relabel and mutants before it can be turned on.
