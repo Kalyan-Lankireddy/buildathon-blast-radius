@@ -15,6 +15,7 @@ Track: RWX Blast Radius. Score is simulated CI seconds plus CPU seconds, lower i
 | v1.8 | a new method in a class body selects the class's users again (v1.7 ran everything) | 170.717 s | 0 | see below | harness: 55 mutants, 0 misses |
 | v1.8 practice | not yet submitted | | | | |
 | v1.9 | edits to one `TRANSFORMS` entry select the tests that looked that key up (recorded on the dispatch table) | 170.717 s | 0 | see below | dict mutants 297.8 s to 236.2 s, 0 misses |
+| v1.10 | edits to one half of a pair-format SQL fixture select only the tests that read that half | 170.717 s | 0 | see below | four TPC fixture mutants 25.5 s to 4.2 / 7.9 s each, 0 misses |
 
 ## Lessons
 - Per-test coverage is blind to work done in child processes. `test_optimizer` and `test_executor` hand their
@@ -85,3 +86,13 @@ Ground truth for the first batch was recomputed after the failure-summary parser
 78 mutants with usable ground truth, 0 misses: 24 source edits, 8 test-file and fixture edits, 17 structural edits,
 6 string edits and reruns, 17 dict-entry edits and reruns, 6 edited keys and deleted entries. Ten structural mutants
 (base class, decorator, annotation, new file, multi-file) were left unfinished; probes of each by hand widen as intended.
+
+- Fixture fields (v1.10). `load_sql_fixture_pairs` yields (meta, sql, expected) and the tests read them differently:
+  `test_execute_tpcds` and `test_execute_tpch` never read `expected`; `test_optimized_tpch` never reads `meta`. A recorder
+  (`tools/labeler/fieldtrack.py`) wraps each row and field and notes which test touches which, and `tools/build_fields.py`
+  turns that into `maps/fields.json`. A fixture is used only when every test that opened it either has recorded reads or
+  was seen never to touch the rows its class stored in setUpClass (26 of 26 pair fixtures qualify). The selector narrows an
+  edit only when `br/fixtures.py` is sure it sits in one half: comment lines, blank lines, meta lines, a moved `;` and
+  edits that touch both halves all keep "every test that opened the file". Blind spot: a C extension that reads a string
+  buffer directly (duckdb.execute(sql)) is invisible to the recorder; for the executor tests the code ignores `expected`
+  by unpacking it into `_`. Only the two TPC files change: the other 24 fixtures are read in full by every test.

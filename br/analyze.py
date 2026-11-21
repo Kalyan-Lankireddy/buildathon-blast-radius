@@ -28,6 +28,7 @@ import json
 import os
 from collections import deque
 
+from .fixtures import changed_field
 from .patchparse import FilePatch, PatchError, apply_hunks
 from .pytree import PyTree
 
@@ -62,6 +63,12 @@ class Maps:
         with gzip.open(path, "rt", encoding="utf-8") as f:
             raw = json.load(f)
         self.tests: list[str] = raw["tests"]
+        self._index = {name: i for i, name in enumerate(self.tests)}
+        fields_path = os.path.join(os.path.dirname(path), "fields.json")
+        self._fields: dict[str, dict[str, list[str]]] = {}
+        if os.path.exists(fields_path):
+            with open(fields_path, encoding="utf-8") as f:
+                self._fields = json.load(f).get("files", {})
         self.full = (1 << len(self.tests)) - 1
         self._sets = raw["sets"]
         self._masks: dict[int, int] = {}
@@ -95,6 +102,17 @@ class Maps:
                 m |= 1 << i
             self._masks[set_id] = m
         return self._masks[set_id]
+
+    def field_readers(self, path: str, field: str) -> int | None:
+        """Tests that read `field` (sql or expected) of a pair-format fixture; None when the map says nothing."""
+        entry = self._fields.get(path)
+        if entry is None or field not in entry:
+            return None
+        mask = 0
+        for test_id in entry[field]:
+            if test_id in self._index:
+                mask |= 1 << self._index[test_id]
+        return mask
 
     def has_file(self, rel: str) -> bool:
         return rel in self._files
@@ -229,9 +247,31 @@ class Analyzer:
             return 0  # mode change only
         if not is_py:
             m = maps.opens_mask(path)
+            narrowed = self.fixture_field_mask(fp)
+            if narrowed is not None:
+                self.note(f"{path}: data file, only the tests that read the edited field: {bin(narrowed).count('1')} "
+                          f"of the {bin(m).count('1')} that opened it")
+                return narrowed
             self.note(f"{path}: data file, tests that opened it: {bin(m).count('1')}")
             return m
         return self.python_mask(fp)
+
+    def fixture_field_mask(self, fp: FilePatch) -> int | None:
+        """For an edit that plainly changes one half of a pair-format fixture: the tests that read that half.
+
+        None (so the caller keeps "every test that opened the file") unless the fixture is in the field map and the
+        edit is certain to sit in one half. See br/fixtures.py and tools/build_fields.py.
+        """
+        path = fp.path
+        if not path.endswith(".sql") or path not in self.maps._fields:
+            return None
+        try:
+            old_text = self.read(path)
+            new_text, edit = apply_hunks(old_text, fp.hunks)
+        except (FullSuite, PatchError):
+            return None
+        field = changed_field(old_text, new_text, edit.removed, [a for a, _, _ in edit.added])
+        return None if field is None else self.maps.field_readers(path, field)
 
     # ---------------------------------------------------------------- python files
     def python_mask(self, fp: FilePatch) -> int:

@@ -18,7 +18,7 @@ The patch is read line by line, and each changed line is classified from the AST
 | a module-level statement | the tests that ran code in the module, built its classes, or did so for its importers |
 | a line that also runs while modules load | the above, widened to the module's users |
 | comments or blank lines only | the tests that read that file as text |
-| a data file (fixtures) | the tests that opened it |
+| a data file (fixtures) | the tests that opened it; for an edit that plainly changes one half of a pair-format `.sql` fixture, only the tests that read that half |
 | anything we cannot read | the full suite |
 
 The selected tests are packed onto 1 to 8 workers, choosing the count that minimizes

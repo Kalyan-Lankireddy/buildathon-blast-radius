@@ -99,3 +99,23 @@ def test_a_changed_literal_inside_a_closure_builder_cannot_break_an_import():
     # a different name, or a parse call that reads its string at import, is not safe
     assert not same_shape(one('T = {k: rename_func("A")}'), one('T = {j: rename_func("A")}'))
     assert not same_shape(one('T = maybe_parse("a")'), one('T = maybe_parse("ab")'))
+
+
+def test_fixture_edit_is_attributed_to_one_half_or_to_none():
+    from br.fixtures import changed_field
+
+    text = "# title: a\nSELECT 1;\nSELECT 2;\n\n-- note\nSELECT 3\n  FROM t;\nSELECT 4;\n"
+    def edit(old_lines, new_text, removed, added):
+        return changed_field(text, new_text, removed, added)
+
+    # an input line, an expected line
+    assert edit(None, text.replace("SELECT 3", "SELECT 33"), [6], [6]) == "sql"
+    assert edit(None, text.replace("SELECT 2;", "SELECT 22;"), [3], [3]) == "expected"
+    assert edit(None, text.replace("SELECT 4;", "SELECT 44;"), [8], [8]) == "expected"
+    # a meta line, a comment line, a blank line: not sure, so None
+    assert edit(None, text.replace("# title: a", "# title: b"), [1], [1]) is None
+    assert edit(None, text.replace("-- note", "-- other"), [5], [5]) is None
+    assert edit(None, text.replace("\n\n", "\n"), [4], []) is None
+    # both halves, a moved boundary, two statements on a line
+    assert changed_field(text, text.replace("SELECT 1;", "SELECT 1").replace("SELECT 2;", "SELECT 2;;"), [2, 3], [2, 3]) is None
+    assert changed_field("A;B;\n", "A;C;\n", [1], [1]) is None

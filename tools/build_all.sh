@@ -22,4 +22,9 @@ docker run --rm -v "$PWD/tools/labeler:/plugin:ro" -v "$PWD/work/out:/out" \
 docker run --rm -v "$PWD/tools:/tools:ro" -v "$PWD/work/out:/out" -e BR_OUT=/out -e BR_ROOT=/src/sqlglot \
   br-labeler python /tools/build_maps.py
 mkdir -p maps && cp work/out/maps.json.gz maps/maps.json.gz
-echo "maps/maps.json.gz updated"
+# fixture field map: which tests read which field of the pair-format SQL fixtures
+mkdir -p work/fields && rm -f work/fields/fields-*.jsonl
+docker run --rm -v "$PWD/tools/labeler:/plugin:ro" -v "$PWD/work/fields:/out" -e PYTHONPATH=/src/sqlglot:/plugin -e BR_OUT=/out br-labeler \
+  pytest -q -p no:cacheprovider -p no:xdist -p br_plugin -p fieldtrack tests/test_executor.py tests/test_optimizer.py tests/test_transpile.py
+python3 tools/build_fields.py work/src/sqlglot-$COMMIT maps/maps.json.gz work/fields maps/fields.json
+echo "maps/maps.json.gz and maps/fields.json updated"
