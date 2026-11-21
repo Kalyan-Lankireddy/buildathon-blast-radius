@@ -11,6 +11,8 @@ Track: RWX Blast Radius. Score is simulated CI seconds plus CPU seconds, lower i
 | v1.5 | class-level setup (setUpClass, class fixtures) shared with every test in the class | 170.717 s | 0 | see below | mutant harness found 2 misses on fixture edits before this fix |
 | v1.6 | import-time statements that could crash an import widen; new package files run everything; docstrings count like comments | 170.717 s | 0 | see below | practice v1.5: 207.5 s |
 | v1.7 | import-time crashes follow the whole importer chain; a new method in a class body runs everything | 170.717 s | 0 | see below | harness: 53 mutants, 0 misses |
+| v1.7 practice | submitted at 8:11 | | 0 | 1.06 s | practice 206.455 s total |
+| v1.8 | a new method in a class body selects the class's users again (v1.7 ran everything) | 170.717 s | 0 | see below | harness: 55 mutants, 0 misses |
 
 ## Lessons
 - Per-test coverage is blind to work done in child processes. `test_optimizer` and `test_executor` hand their
@@ -57,3 +59,13 @@ Ground truth for the first batch was recomputed after the failure-summary parser
 - Dict-key narrowing (an edit to one entry of `TRANSFORMS`, `FUNCTIONS` or `KEYWORDS` selects only tests that looked
   that key up) is written in `tools/labeler/br_plugin.py`, `tools/build_maps.py` and `br/analyze.py`, but the committed
   maps contain no dict data, so it does nothing yet. It needs a relabel and mutants before it can be turned on.
+- Harness noise: xdist workers crash when several test runs share the machine, and the heaviest tests (`test_max_nodes`,
+  `test_execute_tpcds`, `test_scope`) are the ones that die. They pass on an idle machine and the organizers' labels have
+  no such failures. Two mutants looked like misses only because of this, and one of them (a new method in a generator)
+  made v1.7 run the full suite for any new method. `tools/eval_mutants.py` now ignores crashed-worker entries and says how
+  many it dropped; v1.8 goes back to the class-users rule, which had no real miss.
+- Dict-key narrowing is not worth enabling. The tables that matter (`TRANSFORMS`, `FUNCTIONS`, `KEYWORDS`) are merged into
+  subclasses at import (`{**Base.TABLE, ...}`) and `TRANSFORMS` is copied once per class into a cached dispatch table
+  (`generator._build_dispatch`). Recorded lookups on the original dict would miss most real lookups, so the attribute
+  safety test rightly leaves them out, and what remains is a handful of dicts. Recording lookups on the dispatch table
+  itself is the next idea; it needs its own mutants.

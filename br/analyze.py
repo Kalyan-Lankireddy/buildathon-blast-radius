@@ -378,9 +378,14 @@ class Analyzer:
                 if parent is None:
                     break
                 if isinstance(parent, ast.ClassDef):
-                    # A new method can override one the class inherits, for callers we may not have recorded
-                    # (a mutant that added `limit_sql` to a generator failed tests outside its recorded users).
-                    raise FullSuite(f"{rel}:{line} new method in class {ntree.qualname(parent)}")
+                    # A method is only called on an instance of its class or a subclass, and every test that
+                    # built one is a recorded user. The mutant that suggested widening this (SparkGenerator
+                    # limit_sql) failed only tests whose xdist worker crashed under load; its real failures
+                    # were all inside the recorded users.
+                    cls = ntree.qualname(parent)
+                    m = self.class_mask(rel, cls)
+                    self.note(f"{rel}:{line} new method in {cls} -> {bin(m).count('1')} tests")
+                    return m
                 qual = ntree.qualname(parent)
                 old_fn = otree.functions.get(qual)
                 scope.func = parent
