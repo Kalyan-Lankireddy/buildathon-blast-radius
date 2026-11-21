@@ -9,6 +9,7 @@ Track: RWX Blast Radius. Score is simulated CI seconds plus CPU seconds, lower i
 | v1.1 | class constants narrowed to the tests that read them (read sites found in the pinned source) | 177.443 s | 0 | see below | WEEK_OFFSET edit: 11.2 s to about 2.6 s |
 | v1.2 | all modules imported eagerly while labeling; import-time lines widen; replaced lines use the removed line's own tests | 170.717 s | 0 | see below | mutants: 0 misses so far |
 | v1.5 | class-level setup (setUpClass, class fixtures) shared with every test in the class | 170.717 s | 0 | see below | mutant harness found 2 misses on fixture edits before this fix |
+| v1.6 | import-time statements that could crash an import widen; new package files run everything; docstrings count like comments | 170.717 s | 0 | see below | practice v1.5: 207.5 s |
 
 ## Lessons
 - Per-test coverage is blind to work done in child processes. `test_optimizer` and `test_executor` hand their
@@ -37,3 +38,14 @@ the selector's choice. They are for evaluation only.
 | v1.5 maps, source edits (operator and constant swaps, half class level) | 7 so far | 0 | 36 planned, still running |
 
 Ground truth for the first batch was recomputed after the failure-summary parser was fixed.
+- A class-body edit can fail tests that never use the class. Mutant m017 changed `prefix + q` to `prefix - q` inside a
+  list comprehension in `Snowflake`'s sibling `BigQuery.Tokenizer`. It runs when the module loads and raises, so every
+  test file that imports the dialect fails at collection: 1,090 tests failed, the class-users rule chose 294. Statements
+  that run at import and are not plain literals now widen: the full suite in a module that `import sqlglot` loads, every
+  test that imports the module elsewhere. The import graph also learned that `from sqlglot.dialects import BigQuery`
+  imports `dialects/bigquery.py`.
+- Docstrings: the suite has no doctests (`tests/test_docs.py` defines no pytest tests) and `__doc__` is never inspected,
+  so a docstring or bare string edit only matters to tests that read the file as text. Docstring mutants failed no test.
+- The harness's own parser matters. Pytest prints keyword-style subtests as `SUBFAILED(k=v, ...)`, not `SUBFAILED[...]`,
+  and long titles were cut at 300 characters. `tools/eval_mutants.py` now re-reads stored failure lines and flags any it
+  cannot read, so an under-counted ground truth cannot pass as a clean result.

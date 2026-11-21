@@ -50,7 +50,7 @@ def run(name):
     for entry in entries:
         joined = " ".join(entry)
         if joined.startswith("SUBFAILED"):
-            m = re.search(r"\]\s+(tests/\S+)", joined)
+            m = re.search(r"[\]\)]\s+(tests/\S+)", joined)  # SUBFAILED[title] or SUBFAILED(k=v, ...)
         else:
             m = re.match(r"^(?:FAILED|ERROR)\s+(tests/\S+)", joined)
         if m:
@@ -64,8 +64,12 @@ def run(name):
         else:  # a whole file failed to import
             result.update(i for i in ids if i.startswith(f + "::"))
     summary = text.strip().splitlines()[-1] if text.strip() else ""
-    failed_lines = [" ".join(e)[:300] for e in entries]
+    failed_lines = [" ".join(e)[:2000] for e in entries]
+    reported = re.search(r"(\d+) (failed|error)", summary)
+    if reported and not result:
+        print(f"WARNING {name}: pytest reported failures but none were parsed", flush=True)
     json.dump({"failing": sorted(result), "summary": summary, "returncode": proc.returncode,
+               "unparsed": bool(reported and not result),
                "failed_lines": failed_lines[:40]}, open(out, "w"))
     print(name, len(result), summary, flush=True)
 

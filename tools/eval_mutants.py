@@ -4,6 +4,7 @@ Usage: python tools/eval_mutants.py <mutant dir with *.patch and *.truth.json> <
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,32 @@ here = os.path.dirname(os.path.abspath(__file__))
 tests = json.load(open(tests_json))["tests"]
 number = {t["id"]: t["number"] for t in tests}
 ms = {t["number"]: round(t["seconds"] * 1000) for t in tests}
+ALL_IDS = [l.strip() for l in open(os.path.join(here, "..", "work", "out", "collected.txt")) if "::" in l]
+
+
+def reparse(truth):
+    """Failing tests from the stored failure lines, with the SUBFAILED[...] and SUBFAILED(...) forms.
+
+    Returns (failing ids, number of entries that could not be read). The runner's own list is kept too.
+    """
+    import re
+
+    found, bad = set(truth["failing"]), 0
+    for joined in truth.get("failed_lines", []):
+        m = (re.search(r"[\]\)]\s+(tests/\S+)", joined) if joined.startswith("SUBFAILED")
+             else re.match(r"^(?:FAILED|ERROR)\s+(tests/\S+)", joined))
+        if not m:
+            bad += 1
+            continue
+        f = m.group(1)
+        if "::" in f:
+            base = re.sub(r"\[.*$", "", f).rstrip(":")
+            found.update(i for i in ALL_IDS if i == base or i.startswith(base + "::") or i == f)
+        else:
+            found.update(i for i in ALL_IDS if i.startswith(f + "::"))
+    return found, bad
+
+
 names = sorted(f[:-11] for f in os.listdir(mut) if f.endswith(".truth.json"))
 index = json.load(open(os.path.join(mut, "index.json")))
 with tempfile.TemporaryDirectory() as data:
@@ -36,7 +63,10 @@ def cost(workers):
 misses, total, rows = 0, 0, []
 for n in names:
     truth = json.load(open(os.path.join(mut, n + ".truth.json")))
-    failing = {number[i] for i in truth["failing"] if i in number}
+    parsed, unreadable = reparse(truth)
+    if unreadable or (re.search(r"\d+ (failed|error)", truth["summary"]) and not parsed):
+        print(f"UNPARSED {n}: {unreadable} failure entries could not be read; rerun it")
+    failing = {number[i] for i in parsed if i in number}
     sel = {x for w in chosen[n] for x in w}
     missed = sorted(failing - sel)
     misses += bool(missed)
