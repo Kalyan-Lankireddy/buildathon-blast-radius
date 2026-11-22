@@ -51,6 +51,11 @@ class _Masker(ast.NodeTransformer):
 
 class FullSuite(Exception):
     """Raised when the only safe answer is every test."""
+    import_time = False  # DIAGNOSTIC: True when the full suite comes from an import-time edit
+
+
+class ImportFullSuite(FullSuite):
+    import_time = True
 
 
 def module_of(rel: str) -> str:
@@ -211,6 +216,8 @@ class Analyzer:
         self.cover = 0
         self.body_only = True
         self._single_patch = False
+        self.diag_import = False  # DIAGNOSTIC: some selection came from import-time widening (class/module users)
+        self.diag_body = 0        # DIAGNOSTIC: tests chosen by line coverage of function bodies
 
     def note(self, text: str):
         self.reasons.append(text)
@@ -233,6 +240,7 @@ class Analyzer:
         self.patched_sources = {}
         self._import_check = None
         self.cover, self.body_only = 0, True
+        self.diag_import, self.diag_body = False, 0  # DIAGNOSTIC: which kind of rule produced the selection
         self._single_patch = len(patches) == 1
         for fp in patches:  # the new text of each package source file, for the import check
             if fp.old_path and fp.new_path and fp.hunks and fp.path.startswith("sqlglot/") and fp.path.endswith(".py"):
@@ -327,8 +335,10 @@ class Analyzer:
             if rel.startswith("sqlglot/"):
                 if maps.is_core(rel):
                     self.note(f"{rel}: new source does not parse, module is imported eagerly -> full suite")
+                    self.diag_import = True
                     return maps.full
                 m = self.module_mask(rel) | maps.opens_mask(rel)
+                self.diag_import = True
             else:
                 m = maps.any_mask(rel) | maps.opens_mask(rel)
             self.note(f"{rel}: new source does not parse, tests {bin(m).count('1')}")
@@ -359,9 +369,10 @@ class Analyzer:
             # A table filled once per process and reused (generator.py's _DISPATCH_CACHE): the coverage map credits
             # only the test that happened to fill it first, but every later test reads what was filled.
             if maps.is_core(rel):
-                raise FullSuite(f"{rel}: edits code that fills a process-wide cache, in a core module")
+                raise ImportFullSuite(f"{rel}: edits code that fills a process-wide cache, in a core module")
             mask |= self.module_mask(rel, depth_limit=None)
             self.note(f"{rel}: edits code that fills a process-wide cache -> module users")
+            self.diag_import = True
             self.body_only = False
         for r in removed:
             mask |= self.old_line_mask(rel, otree, r)
@@ -382,9 +393,10 @@ class Analyzer:
             if rel.startswith("sqlglot/") and self.check_is_worth_it(mask, wide) and self.package_imports_cleanly():
                 self.note(f"{rel}: import-time statement that is not a plain literal, but the patched package imports cleanly")
             elif maps.is_core(rel):
-                raise FullSuite(f"{rel}: import-time statement that is not a plain literal, in a core module")
+                raise ImportFullSuite(f"{rel}: import-time statement that is not a plain literal, in a core module")
             else:
                 mask = wide
+                self.diag_import = True
                 self.note(f"{rel}: import-time statement that is not a plain literal -> module users")
         return mask
 
@@ -636,6 +648,7 @@ class Analyzer:
                     # were all inside the recorded users.
                     cls = ntree.qualname(parent)
                     m = self.class_mask(rel, cls)
+                    self.diag_import = True
                     self.note(f"{rel}:{line} new method in {cls} -> {bin(m).count('1')} tests")
                     self.body_only = False
                     return m
@@ -644,6 +657,7 @@ class Analyzer:
                 scope.func = parent
             if old_fn is None:
                 m = self.module_mask(rel)
+                self.diag_import = True
                 self.note(f"{rel}:{line} new top-level code -> {bin(m).count('1')} tests")
                 self.body_only = False
                 return m
@@ -668,6 +682,7 @@ class Analyzer:
             mask |= maps.lines_mask(rel, otree.own_lines(stmt))
         if not found:
             mask = maps.lines_mask(rel, range(lo, hi + 1))
+        self.diag_body |= mask
         touched = set(range(lo, hi + 1)) if not found else set()
         for ln in (prev_old, next_old):
             stmt = otree.innermost(ln) if ln >= 1 else None
@@ -675,6 +690,7 @@ class Analyzer:
                 touched.update(otree.own_lines(stmt))
         if maps.import_lines(rel).intersection(touched):
             mask |= self.module_mask(rel) | maps.spawners_for(rel)
+            self.diag_import = True
         return mask
 
     # ---------------------------------------------------------------- scope rules
@@ -696,16 +712,26 @@ class Analyzer:
                 if maps.import_lines(rel).intersection(lines):
                     # this line also runs while modules load, so what it computes feeds every user of them
                     m |= self.module_mask(rel) | maps.spawners_for(rel)
+                    self.diag_import = True
+                else:
+                    self.diag_body |= m
                 return m
-            return maps.lines_mask(rel, range(PyTree.start(scope.func), scope.func.end_lineno + 1))
+            m = maps.lines_mask(rel, range(PyTree.start(scope.func), scope.func.end_lineno + 1))
+            self.diag_body |= m
+            return m
         if scope.kind == "funcheader":
+            self.diag_import = True
             fn = scope.func
             return maps.lines_mask(rel, range(PyTree.start(fn), fn.end_lineno + 1)) | maps.spawners_for(rel)
         if scope.kind == "classheader":
+            self.diag_import = True
             return self.class_mask(rel, scope.cls) | maps.spawners_for(rel)
         if scope.kind == "classbody":
             if stmt is not None and tree.lambda_body_line(stmt, line):
-                return maps.lines_mask(rel, range(PyTree.start(stmt), stmt.end_lineno + 1))
+                m = maps.lines_mask(rel, range(PyTree.start(stmt), stmt.end_lineno + 1))
+                self.diag_body |= m
+                return m
+            self.diag_import = True
             m = self.class_mask(rel, scope.cls)
             if stmt is not None:
                 narrowed = self.attribute_readers(tree, stmt)
@@ -721,9 +747,12 @@ class Analyzer:
             return m | maps.spawners_for(rel)
         # module level
         if stmt is not None and isinstance(stmt, (ast.Import, ast.ImportFrom)) and maps.is_core(rel):
-            raise FullSuite(f"{rel}:{line} import statement changed in a module that `import sqlglot` loads")
+            raise ImportFullSuite(f"{rel}:{line} import statement changed in a module that `import sqlglot` loads")
         if stmt is not None and tree.lambda_body_line(stmt, line):
-            return maps.lines_mask(rel, range(PyTree.start(stmt), stmt.end_lineno + 1))
+            m = maps.lines_mask(rel, range(PyTree.start(stmt), stmt.end_lineno + 1))
+            self.diag_body |= m
+            return m
+        self.diag_import = True
         return self.module_mask(rel) | maps.spawners_for(rel)
 
     def attribute_readers(self, tree: PyTree, stmt) -> int | None:

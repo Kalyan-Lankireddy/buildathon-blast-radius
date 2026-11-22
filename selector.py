@@ -1,4 +1,7 @@
-"""Blast Radius selector: for each commit, print which tests to run and how to split them.
+"""DIAGNOSTIC BUILD (see DIAG below). NOT the final entry: it deliberately drops tests to measure how much practice
+cost sits in one category of selection. Never submit this build to the final.
+
+Blast Radius selector: for each commit, print which tests to run and how to split them.
 
 The selection comes from maps measured on sqlglot at the pinned commit (per-test line coverage, which
 classes each test built, which files it opened). See br/analyze.py for the rules. Any commit this
@@ -27,6 +30,8 @@ DATA = Path(os.environ.get("BR_DATA", "/data"))
 SRC = os.environ.get("BR_SRC", "/opt/sqlglot")
 MAPS = os.environ.get("BR_MAPS", str(HERE / "maps" / "maps.json.gz"))
 EXPLAIN = bool(os.environ.get("BR_EXPLAIN"))
+DIAG = os.environ.get("BR_DIAG", "")  # "D1": empty selection when import-time widening made it; "D2": drop heavy body-coverage tests
+HEAVY_DIAG_SECONDS = 3.0
 VERIFY = os.environ.get("BR_VERIFY", "0") == "1"
 
 # The local check (see verify_choice): a heavy test is dropped from the CI selection only when the cheap tests that
@@ -126,10 +131,21 @@ def main() -> None:
             mask = analyzer.select(files)
             chosen = sorted(set(numbers(mask)) | set(missing)) if mask else sorted(missing)
             chosen = verify_choice(analyzer, mask, chosen)
+            category = ("import" if analyzer.diag_import else "") + ("+" if analyzer.diag_import and analyzer.diag_body else "") \
+                + ("body" if analyzer.diag_body else "") or "other"
+            if DIAG == "D1" and analyzer.diag_import:
+                chosen = sorted(missing)
+            elif DIAG == "D2":
+                body = set(numbers(analyzer.diag_body))
+                chosen = [n for n in chosen if not (n in body and test_by_number[n]["seconds"] >= HEAVY_DIAG_SECONDS)]
+            print(f"category {patch.stem}: {category}; diag import={analyzer.diag_import} body_tests={len(numbers(analyzer.diag_body))}; "
+                  f"selected {len(chosen)}", file=sys.stderr)
             workers = pack(chosen, ms)
         except (FullSuite, PatchError, UnicodeDecodeError, RecursionError, SyntaxError, ValueError) as error:
             analyzer.note(f"fallback to full suite: {error}")
-            workers = full_packed
+            print(f"category {patch.stem}: {'import-full' if getattr(error, 'import_time', False) else 'full-other'}; "
+                  f"{'D1 empties it' if DIAG == 'D1' and getattr(error, 'import_time', False) else ''}", file=sys.stderr)
+            workers = pack(sorted(missing), ms) if DIAG == "D1" and getattr(error, "import_time", False) else full_packed
             full_selected += 1
         except Exception as error:  # never crash: a crash is a rejected run
             analyzer.note(f"fallback to full suite after unexpected {type(error).__name__}: {error}")
