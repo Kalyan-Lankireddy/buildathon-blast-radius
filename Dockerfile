@@ -3,8 +3,8 @@
 FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
-# DIAGNOSTIC BUILD D1: import-time selections are emptied on purpose. Not the final entry.
-ENV BR_DIAG=D1
+# DIAGNOSTIC BUILD D2: heavy tests chosen by function-body line coverage are dropped on purpose. Not the final entry.
+ENV BR_DIAG=D2
 
 # The packages sqlglot's tests need, at the exact versions the organizers labeled with (PyPI; build time only).
 # The selector runs a few cheap tests on a patched copy to decide whether heavy ones can be left out.
